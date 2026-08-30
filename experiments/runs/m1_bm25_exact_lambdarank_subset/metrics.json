@@ -1,0 +1,48 @@
+{
+  "run_name": "m1_bm25_exact_lambdarank_subset",
+  "train_sessions": 300,
+  "train_turn_examples": 2400,
+  "train_groups_used_gold_in_pool": 1313,
+  "train_positives": 1313,
+  "dev_sessions": 100,
+  "dev_turn_examples": 800,
+  "bm25_topk": 200,
+  "exact_topk": 200,
+  "train_candidate_recall": {
+    "recall@20": 0.325,
+    "recall@50": 0.45708333333333334,
+    "recall@100": 0.5095833333333334,
+    "recall@200": 0.5383333333333333
+  },
+  "dev_candidate_recall": {
+    "recall@20": 0.24375,
+    "recall@50": 0.34,
+    "recall@100": 0.3825,
+    "recall@200": 0.415
+  },
+  "dev_source_recall": {
+    "bm25_gold_in_pool": 0.415,
+    "exact_gold_in_pool": 0.05625,
+    "union_gold_in_pool": 0.42375
+  },
+  "union_order_ndcg@20": 0.09281876100697219,
+  "lambdarank_ndcg@20": 0.1351003022263624,
+  "feature_importance_gain": {
+    "union_rank": 29590.662328243256,
+    "bm25_rank": 28164.15932750702,
+    "same_artist_as_history": 21238.074976444244,
+    "popularity": 6904.03971529007,
+    "same_artist_as_last": 6011.160675048828,
+    "bm25_score": 5439.109602928162,
+    "same_album_as_history": 3939.4886264801025,
+    "tag_count": 3537.0347871780396,
+    "release_year": 3171.045353412628,
+    "query_tag_overlap": 3038.1636266708374,
+    "in_history": 2085.3355317115784,
+    "exact_rank": 1832.9451432228088,
+    "log_popularity": 572.9370183944702,
+    "exact_score": 554.6477518081665,
+    "bm25_present": 0.0,
+    "exact_present": 0.0
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "run_name": "smoke_m1_bm25_exact_lambdarank",
+  "train_sessions": 100,
+  "train_turn_examples": 800,
+  "train_groups_used_gold_in_pool": 455,
+  "train_positives": 455,
+  "dev_sessions": 50,
+  "dev_turn_examples": 400,
+  "bm25_topk": 200,
+  "exact_topk": 200,
+  "train_candidate_recall": {
+    "recall@20": 0.325,
+    "recall@50": 0.46625,
+    "recall@100": 0.5325,
+    "recall@200": 0.55375
+  },
+  "dev_candidate_recall": {
+    "recall@20": 0.325,
+    "recall@50": 0.4425,
+    "recall@100": 0.485,
+    "recall@200": 0.5175
+  },
+  "dev_source_recall": {
+    "bm25_gold_in_pool": 0.5175,
+    "exact_gold_in_pool": 0.075,
+    "union_gold_in_pool": 0.525
+  },
+  "union_order_ndcg@20": 0.12413318083903777,
+  "lambdarank_ndcg@20": 0.17394114675612432,
+  "feature_importance_gain": {
+    "union_rank": 21858.95813035965,
+    "same_artist_as_history": 6278.314745664597,
+    "bm25_rank": 5485.07555437088,
+    "popularity": 4182.853760480881,
+    "bm25_score": 4024.047065973282,
+    "tag_count": 3411.1949651241302,
+    "same_artist_as_last": 2629.3378953933716,
+    "query_tag_overlap": 2606.5376806259155,
+    "release_year": 2310.1365315914154,
+    "same_album_as_history": 1127.8353414535522,
+    "exact_rank": 883.1833276748657,
+    "in_history": 802.8991045951843,
+    "log_popularity": 317.9580011367798,
+    "exact_score": 19.642090320587158,
+    "bm25_present": 0.0,
+    "exact_present": 0.0
+  }
+}
