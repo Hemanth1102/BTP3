@@ -14,39 +14,39 @@ import pandas as pd
 from omegaconf import OmegaConf
 
 def chat_history_parser(conversations, music_crs, target_turn_number):
-    """
-    Parse conversation history up to a target turn.
-
-    Args:
-        conversations (List[Dict]): List of conversation turn dictionaries containing:
-            - turn_number: Turn index (1-8)
-            - role: Speaker role ('user', 'assistant', 'music')
-            - content: Message content or track ID
-        music_crs: CRS baseline instance (used to convert track IDs to metadata)
-        target_turn_number (int): The turn to predict (history excludes this turn)
-
-    Returns:
-        Tuple[List[Dict], str]:
-            - chat_history: List of previous messages formatted as [{"role": ..., "content": ...}]
-            - user_query: The user query at the target turn
-    """
     df_conversation = pd.DataFrame(conversations)
-    df_history = df_conversation[df_conversation['turn_number'] < target_turn_number]
+    df_history = df_conversation[
+        df_conversation['turn_number'] < target_turn_number
+    ]
+
     chat_history = []
+    anchor_track_ids = []
+
     for turn_data in df_history.to_dict(orient="records"):
         turn_number = turn_data['turn_number']
         current_role = turn_data['role']
         current_content = turn_data['content']
-        if turn_data['role'] == "music":
+
+        if current_role == "music":
+            anchor_track_ids.append(current_content)
+
             current_role = "assistant"
-            current_content = music_crs.item_db.id_to_metadata(turn_data['content'])
+            current_content = music_crs.item_db.id_to_metadata(
+                current_content
+            )
+
         chat_history.append({
             "role": current_role,
             "content": current_content
         })
-    df_current_turn = df_conversation[df_conversation['turn_number'] == target_turn_number]
+
+    df_current_turn = df_conversation[
+        df_conversation['turn_number'] == target_turn_number
+    ]
+
     user_query = df_current_turn.iloc[0]['content']
-    return chat_history, user_query
+
+    return chat_history, user_query, anchor_track_ids
 
 def main(args):
     """
@@ -90,11 +90,16 @@ def main(args):
         user_id = item['user_id']
         session_id = item['session_id']
         for target_turn_number in range(1, 9):
-            chat_history, user_query = chat_history_parser(item['conversations'], music_crs, target_turn_number)
+            chat_history, user_query, anchor_track_ids = chat_history_parser(
+                item['conversations'],
+                music_crs,
+                target_turn_number
+            )
             batch_data.append({
                 'user_query': user_query,
                 'user_id': user_id,
-                'session_memory': chat_history
+                'session_memory': chat_history,
+                'anchor_track_ids': anchor_track_ids
             })
             metadata.append({
                 'session_id': session_id,

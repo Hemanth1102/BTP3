@@ -6,6 +6,7 @@ from .ranker import LightGBMRanker
 
 from .fusion import CandidateFusion
 from .planner import QueryPlanner, QueryState
+from .planner.ollama import OllamaQwenPlanner
 from .retrievers.base import BaseRetriever
 from .features import FeatureBuilder
 
@@ -43,8 +44,9 @@ class RecommenderV2:
 
         self.retrievers = retrievers
 
-        self.planner = planner or QueryPlanner(
-            mode="mock"
+        self.planner = QueryPlanner(
+            llm=OllamaQwenPlanner("qwen3:8b"),
+            mode="llm",
         )
 
         self.candidate_k = candidate_k

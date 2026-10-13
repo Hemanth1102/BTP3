@@ -7,7 +7,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DATA_PATH = PROJECT_ROOT / "training_data.csv"
+DATA_PATH = PROJECT_ROOT / "training_data_train.csv"
 MODEL_PATH = PROJECT_ROOT / "recommender_v2" / "training" / "ranker.txt"
 
 

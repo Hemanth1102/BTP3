@@ -115,11 +115,12 @@ class BGERetriever(BaseRetriever):
     ) -> torch.Tensor:
         embeddings = []
 
+        from tqdm import tqdm
+
         with torch.inference_mode():
-            for start in range(
-                0,
-                len(texts),
-                self.batch_size,
+            for start in tqdm(
+                range(0, len(texts), self.batch_size),
+                desc="Encoding tracks",
             ):
                 batch_texts = texts[
                     start:start + self.batch_size

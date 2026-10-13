@@ -202,6 +202,15 @@ def main():
                     anchor_track_ids=anchor_track_ids,
                 )
             )
+            
+            print("QUERY:")
+            print(query)
+
+            print("ANCHORS:")
+            print(anchor_track_ids)
+
+            print("QUERY STATE:")
+            print(state.to_dict())
 
             features = recommender.build_features(
                 retrieval_results=retrieval_results,

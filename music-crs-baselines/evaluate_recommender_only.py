@@ -128,6 +128,7 @@ def build_recommender(
         build_item_metadata,
         build_artist_lookup,
         build_album_lookup,
+        build_bge
     )
 
     retrievers = []
@@ -135,6 +136,10 @@ def build_recommender(
     if "bm25" in model_names:
         print("Loading BM25...")
         retrievers.append(build_bm25())
+
+    if "bge" in model_names:
+        print("Loading BGE...")
+        retrievers.append(build_bge(device="cuda"))
 
     if "cf" in model_names:
         print("Loading CF-BPR...")

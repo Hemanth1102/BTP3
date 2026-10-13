@@ -249,38 +249,79 @@ Do not invent artists, albums, songs, genres, or years.
     ) -> Dict[str, Any]:
 
         if isinstance(response, dict):
-            return response
+            data = response
 
-        if not isinstance(response, str):
+        elif isinstance(response, str):
+            text = response.strip()
+
+            # Remove accidental markdown fences.
+            if text.startswith("```"):
+                lines = text.splitlines()
+                lines = [
+                    line
+                    for line in lines
+                    if not line.strip().startswith("```")
+                ]
+                text = "\n".join(lines).strip()
+
+            try:
+                data = json.loads(text)
+
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Planner returned invalid JSON: {exc}"
+                ) from exc
+
+        else:
             raise ValueError(
                 "Planner response must be a dict or string."
             )
 
-        text = response.strip()
-
-        # Remove accidental markdown fences.
-        if text.startswith("```"):
-            lines = text.splitlines()
-
-            lines = [
-                line
-                for line in lines
-                if not line.strip().startswith("```")
-            ]
-
-            text = "\n".join(lines).strip()
-
-        try:
-            data = json.loads(text)
-
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Planner returned invalid JSON: {exc}"
-            ) from exc
-
         if not isinstance(data, dict):
             raise ValueError(
                 "Planner JSON must be an object."
+            )
+
+        required_fields = {
+            "raw_query",
+            "bm25_query",
+            "semantic_query",
+            "artist_names",
+            "album_names",
+            "track_titles",
+            "genre_tags",
+            "mood_phrases",
+            "sonic_descriptors",
+            "lyrical_themes",
+            "year_terms",
+            "min_year",
+            "max_year",
+            "anchor_track_ids",
+            "rejected_track_ids",
+            "rejected_artists",
+            "intent",
+            "need_personalization",
+            "need_new_artist",
+            "need_new_track",
+            "negative_constraints",
+            "mentioned_entities",
+            "planner_confidence",
+        }
+
+        unknown_fields = set(data.keys()) - required_fields
+
+        if unknown_fields:
+            raise ValueError(
+                f"Planner returned unexpected fields: "
+                f"{sorted(unknown_fields)}"
+            )
+
+        missing_fields = required_fields - set(data.keys())
+
+        if missing_fields:
+            raise ValueError(
+                f"Planner response is missing fields: "
+                f"{sorted(missing_fields)}"
             )
 
         return data
