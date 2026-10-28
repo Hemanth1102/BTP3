@@ -13,67 +13,17 @@ DATASET_NAME = "talkpl-ai/TalkPlayData-Challenge-Dataset"
 # Conversation parsing
 # ============================================================
 
-def get_turn_data(session, target_turn):
+def get_turn_context_for(session, target_turn):
     """
-    Build the information available to the recommender at target_turn.
+    What the recommender may see at `target_turn` (shared with the dataset
+    builder so training and evaluation use the same definition).
 
-    Includes:
-        - previous user messages
-        - previous assistant messages
-        - current user message
-
-    Excludes:
-        - current-turn assistant response
-        - current-turn ground-truth music
-        - future turns
+    Excludes the current-turn assistant response, the current-turn
+    ground-truth music and all future turns.
     """
+    from recommender_v2.training.turns import get_turn_context
 
-    messages = session["conversations"]
-
-    history = []
-    anchor_track_ids = []
-    ground_truth = None
-
-    for message in messages:
-        turn_number = message["turn_number"]
-
-        if turn_number > target_turn:
-            break
-
-        if message["role"] == "music":
-
-            if turn_number < target_turn:
-                anchor_track_ids.append(
-                    message["content"]
-                )
-
-            elif turn_number == target_turn:
-                ground_truth = message["content"]
-
-            continue
-
-        if message["role"] == "user":
-            history.append(message)
-
-        elif message["role"] == "assistant":
-            if turn_number < target_turn:
-                history.append(message)
-
-    if ground_truth is None:
-        raise ValueError(
-            f"No ground truth found for turn {target_turn}"
-        )
-
-    query = "\n".join(
-        f"{message['role']}: {message['content']}"
-        for message in history
-    )
-
-    return (
-        query,
-        ground_truth,
-        anchor_track_ids,
-    )
+    return get_turn_context(session["conversations"], target_turn)
 
 
 # ============================================================
@@ -173,11 +123,14 @@ def build_recommender(
         raise ValueError("No models selected.")
 
     from recommender_v2 import RecommenderV2
+    from recommender_v2.training.metadata import load_track_metadata
 
+    # Same catalog metadata the training set was built with.
     return RecommenderV2(
         retrievers=retrievers,
         candidate_k=candidate_k,
         final_k=20,
+        track_metadata=load_track_metadata(),
     )
 
 
@@ -202,31 +155,31 @@ def evaluate_session(
         end_turn + 1,
     ):
 
-        (
-            query,
-            ground_truth,
-            anchor_track_ids,
-        ) = get_turn_data(
-            session,
-            target_turn,
-        )
+        ctx = get_turn_context_for(session, target_turn)
+
+        query = ctx.query
+        ground_truth = ctx.ground_truth
+        anchor_track_ids = ctx.anchor_track_ids
 
         start_time = time.perf_counter()
 
-        retrieval_results = recommender.retrieve_all(
-            query=query,
+        # Plan ONCE and reuse that plan for both the recall diagnostics and the
+        # final ranking, with the history cut to what is visible at this turn.
+        state, retrieval_results = recommender.retrieve_for_ranking(
+            query=ctx.planner_query,
             user_id=user_id,
-            conversation_history=session["conversations"],
+            conversation_history=ctx.history,
             anchor_track_ids=anchor_track_ids,
             session_track_ids=anchor_track_ids,
         )
 
-        final_ids = recommender.recommend(
-            query=query,
+        final_ids = recommender.recommend_from_retrieval(
+            state=state,
+            retrieval_results=retrieval_results,
             user_id=user_id,
-            conversation_history=session["conversations"],
             anchor_track_ids=anchor_track_ids,
             session_track_ids=anchor_track_ids,
+            turn_index=target_turn,
         )
 
         elapsed = time.perf_counter() - start_time

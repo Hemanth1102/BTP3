@@ -113,17 +113,25 @@ class BGERetriever(BaseRetriever):
         self,
         texts: List[str],
     ) -> torch.Tensor:
-        embeddings = []
-
+        """
+        Encode in length-sorted batches (far less padding) and, on CUDA, in
+        fp16 autocast (tensor cores: ~3-4x faster on consumer GPUs). The
+        result is returned in the original order and float32.
+        """
         from tqdm import tqdm
+
+        order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+        chunks = []
+
+        use_amp = self.device.type == "cuda"
 
         with torch.inference_mode():
             for start in tqdm(
-                range(0, len(texts), self.batch_size),
+                range(0, len(order), self.batch_size),
                 desc="Encoding tracks",
             ):
-                batch_texts = texts[
-                    start:start + self.batch_size
+                batch_texts = [
+                    texts[i] for i in order[start:start + self.batch_size]
                 ]
 
                 inputs = self.tokenizer(
@@ -139,23 +147,26 @@ class BGERetriever(BaseRetriever):
                     for key, value in inputs.items()
                 }
 
-                outputs = self.model(**inputs)
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=torch.float16,
+                    enabled=use_amp,
+                ):
+                    outputs = self.model(**inputs)
 
                 # BGE v1.5 uses CLS pooling in its model-card examples.
-                pooled = outputs.last_hidden_state[:, 0]
+                pooled = outputs.last_hidden_state[:, 0].float()
 
-                pooled = F.normalize(
-                    pooled,
-                    p=2,
-                    dim=1,
-                )
+                pooled = F.normalize(pooled, p=2, dim=1)
 
-                embeddings.append(pooled.cpu())
+                chunks.append(pooled.cpu())
 
-        return torch.cat(
-            embeddings,
-            dim=0,
-        ).contiguous()
+        sorted_emb = torch.cat(chunks, dim=0)
+
+        restored = torch.empty_like(sorted_emb)
+        restored[torch.tensor(order)] = sorted_emb
+
+        return restored.contiguous()
 
     def _encode_query(self, query: str) -> torch.Tensor:
         query_text = self.QUERY_INSTRUCTION + query

@@ -4,7 +4,6 @@ from .lexical.bm25 import BM25Retriever
 from .personalized.cf_bpr import CFBPRRetriever
 
 from .dense.bge import BGERetriever
-from .dense.qwen import Qwen3EmbeddingEncoder
 from .dense.clap import CLAPTextAudioRetriever
 
 from .item_to_item.cf import CFItemToItemRetriever
@@ -20,7 +19,6 @@ __all__ = [
     "BM25Retriever",
     "CFBPRRetriever",
     "BGERetriever",
-    "Qwen3EmbeddingEncoder",
     "CLAPTextAudioRetriever",
     "CFItemToItemRetriever",
     "CLAPItemToItemRetriever",

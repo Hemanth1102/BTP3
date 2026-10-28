@@ -1,8 +1,6 @@
 from .retrievers.lexical.bm25 import BM25Retriever
 from .retrievers.personalized.cf_bpr import CFBPRRetriever
 from .retrievers.dense.bge import BGERetriever
-from .retrievers.dense.base_dense import DenseEmbeddingRetriever
-from .retrievers.dense.qwen import Qwen3EmbeddingEncoder
 from .retrievers.dense.clap import CLAPTextAudioRetriever
 from .retrievers.item_to_item.cf import CFItemToItemRetriever
 from .retrievers.item_to_item.clap import CLAPItemToItemRetriever
@@ -24,16 +22,14 @@ USER_EMBEDDING_DATASET = (
 )
 
 
-def build_bm25():
+DEFAULT_TEXT_FIELDS = ["track_name", "artist_name", "album_name", "release_date"]
+
+
+def build_bm25(text_fields=None):
     return BM25Retriever(
         dataset_name=ITEM_DATASET,
         split_types=["all_tracks"],
-        corpus_types=[
-            "track_name",
-            "artist_name",
-            "album_name",
-            "release_date",
-        ],
+        corpus_types=list(text_fields or DEFAULT_TEXT_FIELDS),
         cache_dir="./cache",
     )
 
@@ -48,59 +44,17 @@ def build_cf_bpr():
     )
 
 
-def build_bge(device="cpu"):
+def build_bge(device="cpu", text_fields=None):
     return BGERetriever(
         dataset_name=ITEM_DATASET,
         split_types=["all_tracks"],
-        corpus_types=[
-            "track_name",
-            "artist_name",
-            "album_name",
-            "release_date",
-        ],
+        corpus_types=list(text_fields or DEFAULT_TEXT_FIELDS),
         cache_dir="./cache",
         device=device,
         batch_size=16,
         max_length=512,
     )
 
-def build_qwen_retrievers(device="cpu"):
-    encoder = Qwen3EmbeddingEncoder(
-        device=device
-    )
-
-    metadata = DenseEmbeddingRetriever(
-        name="qwen_metadata",
-        dataset_name=TRACK_EMBEDDING_DATASET,
-        embedding_column="metadata-qwen3_embedding_0.6b",
-        split="all_tracks",
-        query_encoder=encoder,
-        embedding_dim=1024,
-    )
-
-    lyrics = DenseEmbeddingRetriever(
-        name="qwen_lyrics",
-        dataset_name=TRACK_EMBEDDING_DATASET,
-        embedding_column="lyrics-qwen3_embedding_0.6b",
-        split="all_tracks",
-        query_encoder=encoder,
-        embedding_dim=1024,
-    )
-
-    attributes = DenseEmbeddingRetriever(
-        name="qwen_attributes",
-        dataset_name=TRACK_EMBEDDING_DATASET,
-        embedding_column="attributes-qwen3_embedding_0.6b",
-        split="all_tracks",
-        query_encoder=encoder,
-        embedding_dim=1024,
-    )
-
-    return [
-        metadata,
-        lyrics,
-        attributes,
-    ]
 
 def build_clap(device="cpu"):
     return CLAPTextAudioRetriever(
