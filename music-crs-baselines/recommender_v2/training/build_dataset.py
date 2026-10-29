@@ -162,6 +162,10 @@ def main(argv=None):
     p.add_argument("--output", default="training_data_train.csv")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--planner-workers", type=int, default=1,
+                   help="Planner requests in flight at once (threads). Use with "
+                        "OLLAMA_NUM_PARALLEL=<same number> on the Ollama server. "
+                        "Plans do not depend on each other, so the dataset is identical.")
     p.add_argument("--text-fields", nargs="+", default=None,
                    help="Catalog fields indexed by BM25/BGE (default: track_name "
                         "artist_name album_name release_date). Example: add tag_list.")
@@ -273,6 +277,36 @@ def main(argv=None):
             session_id = session["session_id"]
             user_id = session["user_id"]
 
+            # Plan all uncached turns of this session concurrently (the LLM is
+            # the bottleneck; retrieval/features below stay sequential).
+            prefetched = {}
+            if args.planner_workers > 1:
+                todo = []
+                for turn in range(args.start_turn, args.end_turn + 1):
+                    qid = f"{session_id}:{turn}"
+                    if qid not in done and qid not in planner_cache:
+                        todo.append((qid, turn))
+
+                def _plan_one(item):
+                    qid, turn = item
+                    t_plan = time.perf_counter()
+                    try:
+                        c = get_turn_context(session["conversations"], turn)
+                        st = recommender.plan(
+                            query=c.planner_query,
+                            conversation_history=c.history,
+                            anchor_track_ids=c.anchor_track_ids,
+                        )
+                        return qid, st, None, time.perf_counter() - t_plan
+                    except Exception as e:
+                        return qid, None, e, time.perf_counter() - t_plan
+
+                if todo:
+                    from concurrent.futures import ThreadPoolExecutor
+                    with ThreadPoolExecutor(max_workers=args.planner_workers) as pool:
+                        for qid, st, err, sec in pool.map(_plan_one, todo):
+                            prefetched[qid] = (st, err, sec)
+
             for turn in range(args.start_turn, args.end_turn + 1):
 
                 query_id = f"{session_id}:{turn}"
@@ -295,17 +329,23 @@ def main(argv=None):
                     else:
                         t_plan = time.perf_counter()
                         try:
-                            state = recommender.plan(
-                                query=ctx.planner_query,
-                                conversation_history=ctx.history,
-                                anchor_track_ids=ctx.anchor_track_ids,
-                            )
+                            if query_id in prefetched:
+                                state, err, planner_sec = prefetched.pop(query_id)
+                                if err is not None:
+                                    raise err
+                            else:
+                                state = recommender.plan(
+                                    query=ctx.planner_query,
+                                    conversation_history=ctx.history,
+                                    anchor_track_ids=ctx.anchor_track_ids,
+                                )
+                                planner_sec = time.perf_counter() - t_plan
                         except Exception as e:      # planner failed -> flagged fallback
                             errors.append(f"{query_id} planner: {e!r}")
                             state = fallback_state(ctx.query)
                             state.anchor_track_ids = list(ctx.anchor_track_ids)
                             used_fallback = True
-                        planner_sec = time.perf_counter() - t_plan
+                            planner_sec = time.perf_counter() - t_plan
 
                         # Failed plans are not cached, so a re-run retries them.
                         if not used_fallback:

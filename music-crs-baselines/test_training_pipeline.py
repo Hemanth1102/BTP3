@@ -347,6 +347,18 @@ def main():
     check((final_dir / "ranker.txt").exists() and (final_dir / "ranker_features.json").exists(),
           "final-fit saves model + schema")
 
+    print("\n[parallel planner == sequential planner]")
+    out_par = tmp / "par.csv"
+    build_dataset.main(["--split", "train", "--num-sessions", "10",
+                        "--output", str(out_par), "--models", "bm25",
+                        "--planner-workers", "4"])
+    a = pd.read_csv(out_par)
+    b = pd.read_csv(out)
+    b = b[b["query_id"].isin(set(a["query_id"]))]
+    check(a["query_id"].nunique() == b["query_id"].nunique() > 0, "same queries")
+    check(a.shape == b.shape and a.equals(b.reset_index(drop=True)),
+          "parallel-planned dataset is identical to sequential")
+
     print("\n[multi-file training]")
     out2 = tmp / "chunk2.csv"
     build_dataset.main(["--split", "train", "--start-session", "40", "--num-sessions", "8",
