@@ -97,3 +97,19 @@ def build_album_lookup():
         dataset_name=ITEM_DATASET,
         split_types=["all_tracks"],
     )
+
+def build_anchor_artist():
+    from .retrievers import AnchorArtistRetriever
+
+    return AnchorArtistRetriever(
+        dataset_name=ITEM_DATASET,
+        split_types=["all_tracks"],
+    )
+
+def build_transition_artist():
+    from .retrievers import TransitionArtistRetriever
+
+    return TransitionArtistRetriever(
+        dataset_name=ITEM_DATASET,
+        split_types=["all_tracks"],
+    )

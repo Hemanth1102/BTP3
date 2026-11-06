@@ -339,13 +339,124 @@ def main():
         train_ranker.main(["--train", str(out), "--cv-folds", "3", "--cv-rounds", "20",
                            "--min-data-in-leaf", "20"])
     cv_out = buf.getvalue()
-    check("Cross-validated nDCG@20" in cv_out and "lightgbm - rrf_sum" in cv_out,
+    check("nDCG@20 over" in cv_out and "lightgbm - rrf_sum" in cv_out,
           "CV prints per-ranker CI and paired difference")
     final_dir = tmp / "final"
     train_ranker.main(["--train", str(out), "--final-rounds", "30",
                        "--output-dir", str(final_dir), "--min-data-in-leaf", "20"])
     check((final_dir / "ranker.txt").exists() and (final_dir / "ranker_features.json").exists(),
           "final-fit saves model + schema")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        train_ranker.main(["--train", str(out), "--eval-model", str(final_dir)])
+    ev = buf.getvalue()
+    check("Official-style metrics" in ev and "lightgbm - rrf_sum" in ev,
+          "--eval-model scores a dataset with a saved model")
+
+    print("\n[anchor-artist retriever + continuity features]")
+    # Load the module by path: the lexical package __init__ pulls in bm25s.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "recommender_v2.retrievers.lexical.anchor_artist",
+        ROOT / "recommender_v2/retrievers/lexical/anchor_artist.py",
+        submodule_search_locations=None,
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "recommender_v2.retrievers.lexical"
+    lex = types.ModuleType("recommender_v2.retrievers.lexical")
+    lex.__path__ = []
+    sys.modules.setdefault("recommender_v2.retrievers.lexical", lex)
+    import datasets as _ds
+    for _n in ("load_dataset", "concatenate_datasets"):
+        if not hasattr(_ds, _n):
+            setattr(_ds, _n, lambda *a, **k: None)
+    spec.loader.exec_module(mod)
+    AnchorArtistRetriever = mod.AnchorArtistRetriever
+    from collections import defaultdict as _dd
+    r = AnchorArtistRetriever.__new__(AnchorArtistRetriever)
+    r.track_artists = {"a1": ["x"], "a2": ["y"], "t1": ["x"], "t2": ["x"], "t3": ["y"], "t4": ["z"]}
+    r.artist_tracks = _dd(list, {"x": ["a1", "t1", "t2"], "y": ["a2", "t3"], "z": ["t4"]})
+    r.popularity = {"t1": 5.0, "t2": 9.0, "t3": 1.0}
+    got = [x.track_id for x in r.retrieve("", 10, anchor_track_ids=["a1", "a2"])]
+    check(got == ["t3", "t2", "t1"],
+          f"most recent anchor's artist first, then popularity ({got})")
+    check(r.retrieve("", 10, anchor_track_ids=[]) == [], "no anchors -> no candidates")
+    check("a1" not in got and "a2" not in got, "anchors themselves are never proposed")
+
+    meta = {
+        "a1": {"artist_names": ["X"], "album_names": ["AL1"], "genres": ["rock", "indie"], "year": 2000, "popularity": 3.0},
+        "a2": {"artist_names": ["Y"], "album_names": ["AL2"], "genres": ["pop"], "year": 2010, "popularity": 4.0},
+        "c1": {"artist_names": ["X"], "album_names": ["AL1"], "genres": ["rock"], "year": 2004, "popularity": 7.0},
+        "c2": {"artist_names": ["Q"], "album_names": ["ALQ"], "genres": ["jazz"], "year": 1990, "popularity": 1.0},
+    }
+    fb = FeatureBuilder(track_metadata=meta)
+    from recommender_v2.retrievers.base import RetrievalResult as RR
+    rows = {x["track_id"]: x for x in fb.build_candidate_features(
+        {"bm25": [RR("c1", 1.0, 1, "bm25"), RR("c2", 0.5, 2, "bm25")]},
+        anchor_track_ids=["a1", "a2"], turn_index=3)}
+    check(rows["c1"]["same_artist_as_anchor"] == 1 and rows["c2"]["same_artist_as_anchor"] == 0,
+          "same_artist_as_anchor counts anchors sharing an artist")
+    check(rows["c1"]["same_artist_as_last_anchor"] == 0, "last anchor (a2) is a different artist")
+    check(rows["c1"]["same_album_as_anchor"] == 1, "same_album_as_anchor")
+    check(abs(rows["c1"]["anchor_tag_overlap"] - 0.5) < 1e-9, "tag overlap is Jaccard vs best anchor")
+    check(abs(rows["c1"]["year_gap_to_anchors"] - 1.0) < 1e-9, "year gap to mean anchor year (2005)")
+    check(rows["c1"]["candidate_popularity"] == 7.0, "candidate popularity from metadata")
+    first = fb.build_candidate_features({"bm25": [RR("c1", 1.0, 1, "bm25")]},
+                                        anchor_track_ids=[], turn_index=1)[0]
+    check(first["same_artist_as_anchor"] != first["same_artist_as_anchor"],
+          "turn 1 (no anchors): continuity features are NaN")
+
+    print("\n[transition-artist retriever: leave-fold-out]")
+    import importlib.util as _iu
+    _spec = _iu.spec_from_file_location(
+        "recommender_v2.retrievers.lexical.transition_artist",
+        ROOT / "recommender_v2/retrievers/lexical/transition_artist.py")
+    _mod = _iu.module_from_spec(_spec)
+    _mod.__package__ = "recommender_v2.retrievers.lexical"
+    import datasets as _ds2
+    for _n in ("load_dataset", "concatenate_datasets"):
+        if not hasattr(_ds2, _n):
+            setattr(_ds2, _n, lambda *a, **k: None)
+    _spec.loader.exec_module(_mod)
+    TR = _mod.TransitionArtistRetriever
+    ta = {"a1": ("x",), "b1": ("y",), "c1": ("z",), "a2": ("x",), "b2": ("y",), "n1": ("q",)}
+    at = {"x": ["a1", "a2"], "y": ["b1", "b2"], "z": ["c1"], "q": ["n1"]}
+    # many sessions say x -> y; exactly ONE (s_only) says x -> z
+    sessions = [(f"s{i}", ["a1", "b1"]) for i in range(40)] + [("s_only", ["a1", "c1"])]
+    tr = TR.__new__(TR)
+    tr._setup(ta, at, {}, sessions, n_folds=5)
+
+    full = [r.track_id for r in tr.retrieve("", 10, anchor_track_ids=["a2"])]
+    check("b1" in full and "c1" in full, "inference (no begin_session): full table sees both transitions")
+    tr.begin_session("s_only", held_out=True)
+    own = [r.track_id for r in tr.retrieve("", 10, anchor_track_ids=["a2"])]
+    fold_mates = [sid for sid, _ in sessions if _mod.session_fold(sid) == _mod.session_fold("s_only")]
+    check("c1" not in own, "a session's own x->z transition is hidden from it")
+    check("b1" in own or len(fold_mates) > 30, "other sessions' transitions remain available")
+    tr.begin_session("s_only", held_out=False)
+    check("c1" in [r.track_id for r in tr.retrieve("", 10, anchor_track_ids=["a2"])],
+          "held_out=False restores the full table")
+    check(tr.retrieve("", 10, anchor_track_ids=[]) == [], "no anchors -> nothing")
+    check(all(r.track_id not in ("a1", "a2") for r in tr.retrieve("", 10, anchor_track_ids=["a1"])),
+          "never proposes the anchor artist's own tracks")
+
+    print("\n[rebuild from imported planner cache, zero LLM calls]")
+    def _no_llm(prompt, attempt=0):
+        raise AssertionError("LLM must not be called when plans are imported")
+    fake_ollama = types.ModuleType("recommender_v2.planner.ollama")
+    fake_ollama.OllamaQwenPlanner = lambda model: _no_llm
+    sys.modules["recommender_v2.planner.ollama"] = fake_ollama
+    out_re = tmp / "rebuilt.csv"
+    build_dataset.main(["--split", "train", "--num-sessions", "10", "--output", str(out_re),
+                        "--models", "bm25",
+                        "--planner-cache-from", str(out) + ".planner.jsonl"])
+    a = pd.read_csv(out_re)
+    b = pd.read_csv(out)
+    b = b[b["query_id"].isin(set(a["query_id"]))].reset_index(drop=True)
+    check(a.equals(b), "rebuilt dataset equals the original, built without the LLM")
+    fake_ollama.OllamaQwenPlanner = lambda model: llm
+    sys.modules["recommender_v2.planner.ollama"] = fake_ollama
 
     print("\n[parallel planner == sequential planner]")
     out_par = tmp / "par.csv"
@@ -368,7 +479,7 @@ def main():
     with contextlib.redirect_stdout(buf):
         train_ranker.main(["--train", str(out), str(out2), "--cv-folds", "3",
                            "--cv-rounds", "10", "--min-data-in-leaf", "20"])
-    check("Cross-validated" in buf.getvalue(), "two chunks load and cross-validate")
+    check("nDCG@20 over" in buf.getvalue(), "two chunks load and cross-validate")
     try:
         train_ranker.main(["--train", str(out), str(out), "--cv-folds", "2"])
         check(False, "duplicate chunks rejected")
@@ -406,6 +517,26 @@ def main():
         offline = rows["track_id"].to_numpy()[order][:20].tolist()
         bad += live != offline
     check(bad == 0, f"top-20 identical for 25 queries ({bad} mismatches)")
+
+    print("\n[blind-set inference: format and visibility]")
+    import run_blind_inference as RBI
+    blind_rows = []
+    for i in (3, 7, 11):
+        sess = make_session(i)
+        conv = sess["conversations"]
+        # a blind row ends at the user message of the target turn (turn 4)
+        cut = max(k for k, m in enumerate(conv) if m["turn_number"] == 4 and m["role"] == "user")
+        blind_rows.append({"session_id": sess["session_id"], "user_id": sess["user_id"],
+                           "conversations": conv[:cut + 1]})
+    blind_rows.append({**blind_rows[0], "session_id": "no_user", "user_id": None})
+    v_before = len(llm.violations)
+    res = RBI.predict_rows(blind_rows, rec, log=lambda *_: None)
+    check(len(res) == 4 and all(set(r) == {"session_id", "user_id", "turn_number",
+          "predicted_track_ids", "predicted_response"} for r in res), "submission fields")
+    check(all(r["turn_number"] == 4 and len(r["predicted_track_ids"]) == 20 for r in res),
+          "turn number taken from the last message; 20 tracks each")
+    check(len(llm.violations) == v_before, "planner prompts contain nothing from the target turn or later")
+    check(res[3]["user_id"] is None, "missing user_id handled")
 
     print("\n[RRF baseline]")
     rows = [{"bm25_rank": 1.0, "cf_bpr_rank": float("nan"), "best_rank": 1.0, "mean_rank": 1.0},

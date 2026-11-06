@@ -63,6 +63,8 @@ DEFAULT_MODELS = [
     "item_metadata",
     "artist",
     "album",
+    "anchor",
+    "transition",
 ]
 
 ALL_MODELS = DEFAULT_MODELS + ["clap"]
@@ -86,6 +88,8 @@ def build_retrievers(model_names, device="cpu", text_fields=None):
         "item_metadata": lambda: C.build_item_metadata(),
         "artist": lambda: C.build_artist_lookup(),
         "album": lambda: C.build_album_lookup(),
+        "anchor": lambda: C.build_anchor_artist(),
+        "transition": lambda: C.build_transition_artist(),
     }
 
     retrievers = []
@@ -106,15 +110,18 @@ def build_retrievers(model_names, device="cpu", text_fields=None):
 # Planner cache
 # ---------------------------------------------------------------------------
 
-def load_planner_cache(path: Path, tag: str) -> Dict[str, dict]:
+def load_planner_cache(path, tag: str, extra_paths=()) -> Dict[str, dict]:
     """
     Only plans produced with the same planner settings (`tag`) are reused, so
     switching model or prompt layout can never silently mix plans in one dataset.
     """
     cache = {}
     skipped = 0
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
+    for src in [*extra_paths, path]:          # own cache last: it wins
+        src = Path(src)
+        if not src.exists():
+            continue
+        with open(src, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -162,6 +169,10 @@ def main(argv=None):
     p.add_argument("--output", default="training_data_train.csv")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--planner-cache-from", nargs="+", default=None,
+                   help="Existing *.planner.jsonl files whose plans are reused (same "
+                        "planner settings only). Lets you rebuild features after a "
+                        "code change without calling the LLM again.")
     p.add_argument("--planner-workers", type=int, default=1,
                    help="Planner requests in flight at once (threads). Use with "
                         "OLLAMA_NUM_PARALLEL=<same number> on the Ollama server. "
@@ -235,7 +246,11 @@ def main(argv=None):
 
     # Identifies the planner configuration that produced a cached plan.
     planner_tag = f"{args.planner_model}|query=latest_user|v2"
-    planner_cache = load_planner_cache(cache_path, planner_tag)
+    planner_cache = load_planner_cache(
+        cache_path, planner_tag, extra_paths=args.planner_cache_from or []
+    )
+    if args.planner_cache_from:
+        print(f"Planner cache: {len(planner_cache)} plans available (incl. imported).")
 
     done = set()
     if args.resume and done_path.exists():
@@ -276,6 +291,12 @@ def main(argv=None):
 
             session_id = session["session_id"]
             user_id = session["user_id"]
+
+            # Retrievers that learn from the training sessions must not see this
+            # session's own data when it is a training session.
+            for _r in recommender.retrievers:
+                if hasattr(_r, "begin_session"):
+                    _r.begin_session(session_id, held_out=(args.split == "train"))
 
             # Plan all uncached turns of this session concurrently (the LLM is
             # the bottleneck; retrieval/features below stay sequential).
@@ -342,6 +363,8 @@ def main(argv=None):
                                 planner_sec = time.perf_counter() - t_plan
                         except Exception as e:      # planner failed -> flagged fallback
                             errors.append(f"{query_id} planner: {e!r}")
+                            if sum(1 for x in errors if " planner: " in x) <= 3:
+                                print(f"  ! planner failed for {query_id}: {e!r}")
                             state = fallback_state(ctx.query)
                             state.anchor_track_ids = list(ctx.anchor_track_ids)
                             used_fallback = True
@@ -433,6 +456,8 @@ def main(argv=None):
                   f"errors: {len(errors)}  elapsed: {elapsed / 60:.1f} min")
 
             if n_queries >= 50 and n_fallback / n_queries > args.max_fallback_rate:
+                if errors:
+                    Path(str(out) + ".errors.txt").write_text("\n".join(errors))
                 sys.exit(
                     f"Planner fallback rate {n_fallback / n_queries:.1%} exceeds "
                     f"{args.max_fallback_rate:.0%}. Check Ollama / the planner prompt."

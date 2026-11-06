@@ -7,7 +7,7 @@ Reads the same catalog the BM25 / lookup retrievers use
 returns
 
     {track_id: {"artist_names": [...], "album_names": [...],
-                "genres": [...], "year": int | None}}
+                "genres": [...], "year": int | None, "popularity": float | None}}
 
 Column names are the ones the repo already relies on
 (track_name / artist_name / album_name / tag_list / release_date). The loader
@@ -39,6 +39,13 @@ def _parse_year(value: Any) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def load_track_metadata(
     dataset_name: str = ITEM_DATASET,
     split: str = "all_tracks",
@@ -67,6 +74,7 @@ def load_track_metadata(
             "album_names": _as_list(row["album_name"]),
             "genres": _as_list(row["tag_list"]),
             "year": _parse_year(row["release_date"]),
+            "popularity": _to_float(row.get("popularity")),
         }
 
     n = len(out)

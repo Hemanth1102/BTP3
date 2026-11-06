@@ -17,6 +17,8 @@ KNOWN_RETRIEVERS = [
     "item_metadata",
     "artist_lookup",
     "album_lookup",
+    "anchor_artist",
+    "transition_artist",
 ]
 
 QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio"]
@@ -148,6 +150,12 @@ class FeatureBuilder:
             "candidate_year",
             "artist_count",
             "album_count",
+            "candidate_popularity",
+            "same_artist_as_anchor",
+            "same_artist_as_last_anchor",
+            "same_album_as_anchor",
+            "anchor_tag_overlap",
+            "year_gap_to_anchors",
         ]
 
         return names
@@ -208,6 +216,10 @@ class FeatureBuilder:
         rrf_rank = {tid: i + 1 for i, tid in enumerate(order)}
         pool_size = float(len(candidate_ids))
 
+        anchor_meta = [
+            metadata_lookup.get(a) or {} for a in (anchor_track_ids or [])
+        ]
+
         rows = []
 
         for track_id in candidate_ids:
@@ -233,6 +245,11 @@ class FeatureBuilder:
                 row,
                 metadata_lookup.get(track_id),
                 query_state,
+            )
+            self._add_anchor_features(
+                row,
+                metadata_lookup.get(track_id),
+                anchor_meta,
             )
 
             # Guarantee the schema, whatever the code paths above did.
@@ -495,6 +512,63 @@ class FeatureBuilder:
         else:
             ok = (lo is None or year >= lo) and (hi is None or year <= hi)
             row["year_in_range"] = float(ok)
+
+    # =========================================================
+    # Session-anchor features (artist / album / tag / year continuity)
+    # =========================================================
+
+    def _add_anchor_features(self, row, metadata, anchor_meta):
+
+        names = (
+            "candidate_popularity",
+            "same_artist_as_anchor",
+            "same_artist_as_last_anchor",
+            "same_album_as_anchor",
+            "anchor_tag_overlap",
+            "year_gap_to_anchors",
+        )
+
+        if not metadata:
+            for n in names:
+                row[n] = NAN
+            return
+
+        pop = metadata.get("popularity")
+        row["candidate_popularity"] = float(pop) if pop is not None else NAN
+
+        if not anchor_meta:
+            # Turn 1: no anchors, so continuity features do not apply.
+            row["same_artist_as_anchor"] = NAN
+            row["same_artist_as_last_anchor"] = NAN
+            row["same_album_as_anchor"] = NAN
+            row["anchor_tag_overlap"] = NAN
+            row["year_gap_to_anchors"] = NAN
+            return
+
+        artists = _norm_set(metadata.get("artist_names"))
+        albums = _norm_set(metadata.get("album_names"))
+        genres = _norm_set(metadata.get("genres"))
+        year = metadata.get("year")
+
+        a_artists = [_norm_set(m.get("artist_names")) for m in anchor_meta]
+        a_albums = [_norm_set(m.get("album_names")) for m in anchor_meta]
+
+        row["same_artist_as_anchor"] = float(sum(bool(artists & x) for x in a_artists))
+        row["same_artist_as_last_anchor"] = float(bool(artists & a_artists[-1]))
+        row["same_album_as_anchor"] = float(sum(bool(albums & x) for x in a_albums))
+
+        best = 0.0
+        for m in anchor_meta:
+            g = _norm_set(m.get("genres"))
+            if genres and g:
+                best = max(best, len(genres & g) / len(genres | g))
+        row["anchor_tag_overlap"] = best
+
+        a_years = [m.get("year") for m in anchor_meta if m.get("year")]
+        if year and a_years:
+            row["year_gap_to_anchors"] = abs(float(year) - sum(a_years) / len(a_years))
+        else:
+            row["year_gap_to_anchors"] = NAN
 
     # =========================================================
     # Utilities

@@ -216,9 +216,16 @@ def run_cv(df, feature_names, params, folds, rounds, seed):
         oof[is_val] = model.predict(df.loc[is_val, feature_names])
         print(f"  fold {i + 1}/{folds}: {len(fs)} sessions held out")
 
+    scorers = {"lightgbm": oof}
+    report(df, feature_names, scorers)
+
+
+def report(df, feature_names, scorers):
+    """Per-ranker nDCG@20 with session-bootstrap CIs and paired differences."""
     q_sessions = df.drop_duplicates("query_id").set_index("query_id")["session_id"]
 
-    scorers = {"lightgbm": oof, "rrf_sum": df["rrf_sum"].to_numpy()}
+    scorers = dict(scorers)
+    scorers["rrf_sum"] = df["rrf_sum"].to_numpy()
     for name in sorted({c[:-5] for c in feature_names if c.endswith("_rank")}
                        - {"best", "worst", "mean", "median", "rrf"}):
         if df[f"{name}_present"].sum() > 0:
@@ -227,7 +234,7 @@ def run_cv(df, feature_names, params, folds, rounds, seed):
     per_q = {n: query_ndcg(df, sc) for n, sc in scorers.items()}
     sess = q_sessions.loc[per_q["lightgbm"].index]
 
-    print(f"\nCross-validated nDCG@20 over {len(sess)} queries "
+    print(f"\nnDCG@20 over {len(sess)} queries "
           f"({sess.nunique()} sessions), 95% CI by session bootstrap:")
     print(f"  {'ranker':<22}{'nDCG@20':>9}   95% CI")
     for name, v in sorted(per_q.items(), key=lambda kv: -kv[1].mean()):
@@ -240,6 +247,27 @@ def run_cv(df, feature_names, params, folds, rounds, seed):
             m, (lo, hi) = session_bootstrap(diff, sess)
             verdict = "significant" if lo > 0 else "NOT significant"
             print(f"  lightgbm - {ref}: {m:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]  ({verdict})")
+
+
+def run_eval(df, feature_names, model_dir):
+    """Score a held-out dataset with a saved model (no training)."""
+    import lightgbm as lgb
+
+    model_dir = Path(model_dir)
+    saved = json.loads((model_dir / "ranker_features.json").read_text())
+    if saved != feature_names:
+        sys.exit("Model and dataset feature schemas differ; rebuild the dataset "
+                 "with the same code version.")
+    model = lgb.Booster(model_file=str(model_dir / "ranker.txt"))
+    scores = model.predict(df[feature_names])
+
+    m = evaluate_scores(df, scores)
+    print("\nOfficial-style metrics (single gold track per query):")
+    for k in ("ndcg@20", "ndcg@10", "hit@20", "hit@1", "pool_recall"):
+        print(f"  {k:<12}{m[k]:.4f}")
+    print(f"  queries     {m['queries']}")
+
+    report(df, feature_names, {"lightgbm": scores})
 
 
 def retriever_baseline_scores(df, retriever):
@@ -274,6 +302,10 @@ def main(argv=None):
                         "reranker really beats the baselines.")
     p.add_argument("--cv-rounds", type=int, default=100,
                    help="Boosting rounds per CV fold (fixed, no early stopping).")
+    p.add_argument("--eval-model", default=None,
+                   help="Directory with ranker.txt + ranker_features.json. Scores the "
+                        "--train file(s) (use a held-out test dataset) and prints "
+                        "metrics with confidence intervals; nothing is trained.")
     p.add_argument("--final-rounds", type=int, default=0,
                    help="Train on ALL data for exactly this many rounds and save "
                         "the model (no validation split).")
@@ -286,6 +318,10 @@ def main(argv=None):
 
     print("Loading training data...")
     df, feature_names = load_datasets(args.train)
+
+    if args.eval_model:
+        run_eval(df, feature_names, args.eval_model)
+        return
 
     if args.val:
         val_df, val_features = load_dataset(Path(args.val))

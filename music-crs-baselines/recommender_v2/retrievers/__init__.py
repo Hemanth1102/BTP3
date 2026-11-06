@@ -12,6 +12,8 @@ from .item_to_item.metadata import MetadataItemToItemRetriever
 
 from .lexical.artist_lookup import ArtistLookupRetriever
 from .lexical.album_lookup import AlbumLookupRetriever
+from .lexical.anchor_artist import AnchorArtistRetriever
+from .lexical.transition_artist import TransitionArtistRetriever
 
 __all__ = [
     "RetrievalResult",
@@ -25,4 +27,6 @@ __all__ = [
     "MetadataItemToItemRetriever",
     "ArtistLookupRetriever",
     "AlbumLookupRetriever",
+    "AnchorArtistRetriever",
+    "TransitionArtistRetriever",
 ]
