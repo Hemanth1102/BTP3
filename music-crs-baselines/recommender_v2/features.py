@@ -1,10 +1,12 @@
 import math
 import re
+from collections import defaultdict
+from itertools import takewhile
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from .text_norm import base_title_norm, normalize_name
-from typing import Any, Dict, List, Optional
+from .text_norm import album_keys, base_title_norm, normalize_name, normalized_names
 
 
 # Every retriever the project knows about. The feature schema is built from this
@@ -31,12 +33,16 @@ _NEW_ITEM_TO_ITEM_RETRIEVERS = [
     "item_clap_decay", "item_clap_max",
     "item_metadata_decay", "item_metadata_max",
 ]
-KNOWN_RETRIEVERS = _LEGACY_RETRIEVERS + ["session_bm25", "anchor_album"] + _NEW_ITEM_TO_ITEM_RETRIEVERS
-FEATURE_SCHEMA_VERSION = 1
+KNOWN_RETRIEVERS = (
+    _LEGACY_RETRIEVERS + ["session_bm25", "anchor_album"] + _NEW_ITEM_TO_ITEM_RETRIEVERS + ["cooc_track"]
+)
+FEATURE_SCHEMA_VERSION = 2
 
 QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio", "session_bm25"]
 PERSONALIZED_RETRIEVERS = ["cf_bpr"]
-ITEM_TO_ITEM_RETRIEVERS = ["item_cf_bpr", "item_clap", "item_metadata"] + _NEW_ITEM_TO_ITEM_RETRIEVERS
+ITEM_TO_ITEM_RETRIEVERS = (
+    ["item_cf_bpr", "item_clap", "item_metadata"] + _NEW_ITEM_TO_ITEM_RETRIEVERS + ["cooc_track"]
+)
 ENTITY_RETRIEVERS = ["artist_lookup", "album_lookup", "title_lookup"]
 
 INTENTS = [
@@ -66,6 +72,32 @@ EXTRA_FEATURES = (
      for kind in ("centroid_sim", "last_sim", "max_sim")]
     + ["user_cf_sim", "artist_track_count", "popularity_rank_in_pool"]
 )
+
+FULLPOOL_TEXT_SCORES = ("fp_bm25_msg_score", "fp_bm25_session_score", "fp_bge_cos")
+FULLPOOL_TEXT_FEATURES = tuple(
+    name + suffix for name in FULLPOOL_TEXT_SCORES for suffix in ("", "_rank_in_pool", "_pct_in_pool")
+)
+STREAK_FEATURES = (
+    "artist_streak_last", "album_streak_last", "same_album_as_last_anchor", "artist_anchor_share",
+    "turns_since_artist_played", "album_unplayed_count", "last_anchors_same_album", "last_anchors_same_artist",
+)
+POOL_AGGREGATE_FEATURES = ("rrf_sum_z", "num_sources_pct_in_pool")
+POOL_RELATIVE_FEATURES = tuple(f"{name}_rank_pct" for name in KNOWN_RETRIEVERS) + POOL_AGGREGATE_FEATURES
+FEATURE_GROUPS = {
+    "fullpool_text": FULLPOOL_TEXT_FEATURES,
+    "streaks": STREAK_FEATURES,
+    "pool_relative": POOL_RELATIVE_FEATURES,
+}
+
+
+def _descending_ranks(scores):
+    """Competition ranks for finite scores with equal values sharing a rank."""
+    scores = np.asarray(scores)
+    valid = np.isfinite(scores)
+    ranks = np.full(scores.shape, np.nan, dtype=float)
+    _, positions, counts = np.unique(scores[valid], return_inverse=True, return_counts=True)
+    ranks[valid] = (1 + np.sum(counts) - np.cumsum(counts))[positions]
+    return ranks
 
 
 def _take(matrix, idx):
@@ -132,6 +164,8 @@ class FeatureBuilder:
         self._spaces = {}          # key -> (matrix, {track_id: row})
         self._user_space = None    # (user_embeddings, track matrix, {track_id: row})
         self._artist_counts = None
+        self._session_bm25 = self._bge = None
+        self._streak_catalogue = self._index_streak_catalogue(self.track_metadata)
 
     # =========================================================
     # Schema
@@ -201,6 +235,9 @@ class FeatureBuilder:
         names += self._retriever_feature_names(
             source for source in self.retriever_names if source not in _LEGACY_RETRIEVERS
         )
+        names += FULLPOOL_TEXT_FEATURES + STREAK_FEATURES
+        names += [f"{self._safe_name(source)}_rank_pct" for source in self.retriever_names]
+        names += POOL_AGGREGATE_FEATURES
 
         return names
 
@@ -222,6 +259,7 @@ class FeatureBuilder:
         query_state=None,
         candidate_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
         turn_index: Optional[int] = None,
+        planner_fallback: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Build one feature row per candidate (plus a leading "track_id").
@@ -246,8 +284,11 @@ class FeatureBuilder:
 
         if candidate_ids is None:
             candidate_ids = self._build_candidate_union(retrieval_results)
+        if not len(candidate_ids):
+            return []
 
         indexed = self._index_results(retrieval_results)
+        list_lengths = {source: len(results) for source, results in retrieval_results.items()}
         norm_scores = self._normalised_scores(indexed)
 
         # Pool-level quantities (same value for every candidate of the query).
@@ -275,7 +316,7 @@ class FeatureBuilder:
 
             row: Dict[str, Any] = {"track_id": track_id}
 
-            self._add_retriever_features(row, track_id, indexed, norm_scores)
+            self._add_retriever_features(row, track_id, indexed, norm_scores, list_lengths)
             self._add_cross_retriever_features(row, track_id, indexed, norm_scores)
 
             row["rrf_rank_in_pool"] = float(rrf_rank[track_id])
@@ -313,6 +354,9 @@ class FeatureBuilder:
             anchor_track_ids=anchor_track_ids,
             metadata_lookup=metadata_lookup,
         )
+        self._add_fullpool_text(rows, candidate_ids, query_state, anchor_track_ids, planner_fallback)
+        self._add_streak_features(rows, anchor_track_ids, session_track_ids, metadata_lookup)
+        self._add_pool_relative_features(rows)
 
         return rows
 
@@ -364,7 +408,7 @@ class FeatureBuilder:
     # Per-retriever features
     # =========================================================
 
-    def _add_retriever_features(self, row, track_id, indexed, norm_scores):
+    def _add_retriever_features(self, row, track_id, indexed, norm_scores, list_lengths):
 
         for source in self.retriever_names:
 
@@ -385,6 +429,7 @@ class FeatureBuilder:
             row[f"{p}_score"] = float(result.score)
             row[f"{p}_score_norm"] = norm_scores[source][track_id]
             row[f"{p}_rrf"] = 1.0 / (self.RRF_K + rank)
+            row[f"{p}_rank_pct"] = rank / list_lengths[source]
 
     # =========================================================
     # Cross-retriever features
@@ -652,11 +697,16 @@ class FeatureBuilder:
     # =========================================================
 
     def attach_embeddings(self, retrievers) -> None:
-        """Reuse the track/user matrices the item-to-item retrievers already hold."""
+        """Reuse the indexes and embedding matrices loaded for retrieval."""
         self._spaces = {}
         self._user_space = None
+        self._session_bm25 = self._bge = None
         for r in retrievers:
             name = getattr(r, "name", None)
+            if name == "session_bm25" and hasattr(r, "score_candidates"):
+                self._session_bm25 = r
+            if name == "bge" and hasattr(r, "score_candidates"):
+                self._bge = r
             for key, rname in EMBEDDING_SPACES.items():
                 if name == rname and hasattr(r, "track_embeddings") \
                         and hasattr(r, "track_to_index"):
@@ -749,6 +799,90 @@ class FeatureBuilder:
             for r, p in zip(rows, pops):
                 if p == p:
                     r["popularity_rank_in_pool"] = bisect.bisect_left(valid, p) / n
+
+    def _add_fullpool_text(self, rows, candidate_ids, query_state, anchors, planner_fallback):
+        if query_state is None:
+            return
+        message = getattr(query_state, "raw_query", "") or ""
+        scores = {}
+        if self._session_bm25 is not None:
+            bm25 = self._session_bm25
+            # Read the full session score first to reuse the catalogue scores from retrieval.
+            session = bm25.session_tokens(message, anchors)
+            scores["fp_bm25_session_score"] = bm25.score_candidates(session, candidate_ids)
+            tokens = bm25.message_tokens(message)
+            scores["fp_bm25_msg_score"] = (scores["fp_bm25_session_score"] if tokens == session else
+                                             bm25.score_candidates(tokens, candidate_ids))
+        semantic = getattr(query_state, "semantic_query", "") or ""
+        query = semantic if semantic.strip() and not planner_fallback else message
+        if self._bge is not None and query.strip():
+            scores["fp_bge_cos"] = self._bge.score_candidates(query, candidate_ids)
+        for name, values in scores.items():
+            ranks = _descending_ranks(values)
+            for row, value, rank in zip(rows, values, ranks):
+                row[name] = float(value)
+                row[name + "_rank_in_pool"] = float(rank)
+                row[name + "_pct_in_pool"] = float(rank / len(rows))
+
+    @staticmethod
+    def _index_streak_catalogue(metadata_lookup):
+        by_track, by_album = {}, defaultdict(set)
+        for track_id, metadata in metadata_lookup.items():
+            if not metadata:
+                continue
+            artists = frozenset(normalized_names(metadata.get("artist_names")))
+            albums = frozenset(album_keys(metadata.get("album_names"), metadata.get("artist_names")))
+            by_track[track_id] = (artists, albums)
+            for album in albums:
+                by_album[album].add(track_id)
+        return by_track, by_album
+
+    def _add_streak_features(self, rows, anchor_track_ids, session_track_ids, metadata_lookup):
+        by_track, by_album = (self._streak_catalogue if metadata_lookup is self.track_metadata else
+                              self._index_streak_catalogue(metadata_lookup))
+        if not by_track:
+            return
+        anchors = anchor_track_ids or ()
+        played = set(anchors) | set(session_track_ids or ())
+        unknown = (frozenset(), frozenset())
+        recent = [by_track.get(track_id, unknown) for track_id in reversed(anchors)]
+        last_artists, last_albums = recent[0] if recent else unknown
+        prev_artists, prev_albums = recent[1] if len(recent) >= 2 else unknown
+        same_artist = float(bool(last_artists & prev_artists)) if last_artists and prev_artists else NAN
+        same_album = float(bool(last_albums & prev_albums)) if last_albums and prev_albums else NAN
+        known_anchor_artist = any(artists for artists, _ in recent)
+        unplayed = {}
+        for row in rows:
+            row["last_anchors_same_artist"] = same_artist
+            row["last_anchors_same_album"] = same_album
+            artists, albums = by_track.get(row["track_id"], unknown)
+            if artists:
+                matches = [bool(artists & anchor_artists) for anchor_artists, _ in recent]
+                if not anchors or last_artists:
+                    row["artist_streak_last"] = float(sum(takewhile(bool, matches)))
+                if known_anchor_artist:
+                    row["artist_anchor_share"] = sum(matches) / len(anchors)
+                row["turns_since_artist_played"] = next((float(age) for age, match in enumerate(matches, 1)
+                                                         if match), NAN)
+            if albums:
+                matches = [bool(albums & anchor_albums) for _, anchor_albums in recent]
+                if not anchors or last_albums:
+                    row["album_streak_last"] = float(sum(takewhile(bool, matches)))
+                if last_albums:
+                    row["same_album_as_last_anchor"] = float(matches[0])
+                if albums not in unplayed:
+                    album_tracks = set().union(*(by_album[key] for key in albums))
+                    unplayed[albums] = float(len(album_tracks - played))
+                row["album_unplayed_count"] = unplayed[albums]
+
+    @staticmethod
+    def _add_pool_relative_features(rows):
+        rrf = np.array([row["rrf_sum"] for row in rows])
+        z = (rrf - rrf.mean()) / rrf.std() if np.ptp(rrf) > 0 else np.zeros(len(rows))
+        source_pct = _descending_ranks([row["num_sources"] for row in rows]) / len(rows)
+        for row, value, pct in zip(rows, z, source_pct):
+            row["rrf_sum_z"] = float(value)
+            row["num_sources_pct_in_pool"] = float(pct)
 
     # =========================================================
     # Utilities

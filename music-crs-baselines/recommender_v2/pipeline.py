@@ -244,6 +244,7 @@ class RecommenderV2:
         session_track_ids=None,
         query_state=None,
         turn_index=None,
+        planner_fallback=False,
     ):
         return self.feature_builder.build_candidate_features(
             retrieval_results=retrieval_results,
@@ -254,6 +255,7 @@ class RecommenderV2:
             ),
             query_state=query_state,
             turn_index=turn_index,
+            planner_fallback=planner_fallback,
         )
 
     # ---------------------------------------------------------

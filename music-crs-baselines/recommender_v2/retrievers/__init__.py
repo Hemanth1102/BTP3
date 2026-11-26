@@ -9,6 +9,7 @@ from .dense.clap import CLAPTextAudioRetriever
 
 from .item_to_item.cf import CFItemToItemRetriever
 from .item_to_item.clap import CLAPItemToItemRetriever
+from .item_to_item.cooc_track import CooccurrenceTrackRetriever
 from .item_to_item.metadata import MetadataItemToItemRetriever
 
 from .lexical.artist_lookup import ArtistLookupRetriever
@@ -28,6 +29,7 @@ __all__ = [
     "CLAPTextAudioRetriever",
     "CFItemToItemRetriever",
     "CLAPItemToItemRetriever",
+    "CooccurrenceTrackRetriever",
     "MetadataItemToItemRetriever",
     "ArtistLookupRetriever",
     "AlbumLookupRetriever",

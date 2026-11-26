@@ -94,6 +94,13 @@ def build_item_metadata(**options):
         **options,
     )
 
+
+def build_cooc_track(**options):
+    from .retrievers import CooccurrenceTrackRetriever
+
+    return CooccurrenceTrackRetriever(**options)
+
+
 def build_artist_lookup():
     return ArtistLookupRetriever(
         dataset_name=ITEM_DATASET,

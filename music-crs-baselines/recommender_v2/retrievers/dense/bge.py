@@ -2,6 +2,7 @@ import json
 import os
 from typing import List, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
@@ -69,6 +70,8 @@ class BGERetriever(BaseRetriever):
 
         self._load_corpus()
         self._load_or_build_index()
+        self.track_to_index = {track_id: index for index, track_id in enumerate(self.track_ids)}
+        self._last_query = None
 
     def _load_corpus(self):
         from datasets import load_dataset, concatenate_datasets
@@ -197,6 +200,22 @@ class BGERetriever(BaseRetriever):
 
         return embedding[0].cpu()
 
+    def _query_embedding(self, query):
+        last = self._last_query
+        if last is not None and last[0] == query:
+            return last[1]
+        embedding = self._encode_query(query)
+        self._last_query = (query, embedding)
+        return embedding
+
+    def score_candidates(self, query, candidate_ids):
+        indices = np.array([self.track_to_index.get(track_id, -1) for track_id in candidate_ids], dtype=int)
+        known = indices >= 0
+        scores = np.full(len(candidate_ids), np.nan, dtype=np.float32)
+        if known.any():
+            scores[known] = (self.track_embeddings[indices[known]] @ self._query_embedding(query)).numpy()
+        return scores
+
     def _load_or_build_index(self):
         embeddings_path = os.path.join(
             self.index_dir,
@@ -270,7 +289,7 @@ class BGERetriever(BaseRetriever):
         session_track_ids=None,
     ) -> List[RetrievalResult]:
 
-        query_embedding = self._encode_query(query)
+        query_embedding = self._query_embedding(query)
 
         scores = torch.matmul(
             self.track_embeddings,

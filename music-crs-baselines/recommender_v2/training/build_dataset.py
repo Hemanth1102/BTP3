@@ -75,6 +75,7 @@ DEFAULT_MODELS = [
     "item_clap_max",
     "item_metadata_decay",
     "item_metadata_max",
+    "cooc_track",
 ]
 
 ALL_MODELS = DEFAULT_MODELS + ["clap"]
@@ -116,6 +117,7 @@ def build_retrievers(model_names, device="cpu", text_fields=None, session_bm25_o
         "item_clap_max": lambda: build_item(C.build_item_clap, "maxsim"),
         "item_metadata_decay": lambda: build_item(C.build_item_metadata, "decay"),
         "item_metadata_max": lambda: build_item(C.build_item_metadata, "maxsim"),
+        "cooc_track": C.build_cooc_track,
     }
 
     retrievers = []
@@ -451,6 +453,7 @@ def main(argv=None):
                         anchor_track_ids=ctx.anchor_track_ids,
                         query_state=state,
                         turn_index=turn,
+                        planner_fallback=used_fallback,
                     )
 
                     features_sec = time.perf_counter() - t_feat

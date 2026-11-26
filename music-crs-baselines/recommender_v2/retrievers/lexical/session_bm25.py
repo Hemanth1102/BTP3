@@ -31,6 +31,8 @@ class SessionBM25Retriever(BM25Retriever):
             fields.append("tag_list")
         super().__init__(dataset_name, split_types, fields, cache_dir)
         self._anchor_tokens = {}
+        self.track_to_index = {track_id: index for index, track_id in enumerate(self.track_ids)}
+        self._last_score = None
 
     def _corpus_cache_key(self):
         # The remaining options affect the query only and can reuse the same index.
@@ -69,9 +71,22 @@ class SessionBM25Retriever(BM25Retriever):
 
     def score_tokens(self, tokens):
         """One BM25 score per track in index order, including zero matches."""
-        if not tokens:
-            return np.zeros(len(self.track_ids), dtype=np.float32)
-        return self.bm25_model.get_scores(tokens)
+        key = tuple(tokens)
+        last = self._last_score
+        if last is not None and last[0] == key:
+            return last[1]
+        scores = (self.bm25_model.get_scores(list(key)) if key else
+                  np.zeros(len(self.track_ids), dtype=np.float32))
+        self._last_score = (key, scores)
+        return scores
+
+    def score_candidates(self, tokens, candidate_ids):
+        indices = np.array([self.track_to_index.get(track_id, -1) for track_id in candidate_ids], dtype=int)
+        known = indices >= 0
+        scores = np.full(len(candidate_ids), np.nan, dtype=np.float32)
+        if known.any():
+            scores[known] = self.score_tokens(tokens)[indices[known]]
+        return scores
 
     def retrieve(self, query, topk=100, user_id=None, anchor_track_ids=None,
                  session_track_ids=None, query_state=None):
