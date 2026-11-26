@@ -33,12 +33,13 @@ _NEW_ITEM_TO_ITEM_RETRIEVERS = [
     "item_clap_decay", "item_clap_max",
     "item_metadata_decay", "item_metadata_max",
 ]
-KNOWN_RETRIEVERS = (
+_SCHEMA_V2_RETRIEVERS = (
     _LEGACY_RETRIEVERS + ["session_bm25", "anchor_album"] + _NEW_ITEM_TO_ITEM_RETRIEVERS + ["cooc_track"]
 )
-FEATURE_SCHEMA_VERSION = 2
+KNOWN_RETRIEVERS = _SCHEMA_V2_RETRIEVERS + ["dense_ft"]
+FEATURE_SCHEMA_VERSION = 3
 
-QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio", "session_bm25"]
+QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio", "session_bm25", "dense_ft"]
 PERSONALIZED_RETRIEVERS = ["cf_bpr"]
 ITEM_TO_ITEM_RETRIEVERS = (
     ["item_cf_bpr", "item_clap", "item_metadata"] + _NEW_ITEM_TO_ITEM_RETRIEVERS + ["cooc_track"]
@@ -82,7 +83,9 @@ STREAK_FEATURES = (
     "turns_since_artist_played", "album_unplayed_count", "last_anchors_same_album", "last_anchors_same_artist",
 )
 POOL_AGGREGATE_FEATURES = ("rrf_sum_z", "num_sources_pct_in_pool")
-POOL_RELATIVE_FEATURES = tuple(f"{name}_rank_pct" for name in KNOWN_RETRIEVERS) + POOL_AGGREGATE_FEATURES
+POOL_RELATIVE_FEATURES = tuple(f"{name}_rank_pct" for name in _SCHEMA_V2_RETRIEVERS) + (
+    *POOL_AGGREGATE_FEATURES, "dense_ft_rank_pct",
+)
 FEATURE_GROUPS = {
     "fullpool_text": FULLPOOL_TEXT_FEATURES,
     "streaks": STREAK_FEATURES,
@@ -233,11 +236,13 @@ class FeatureBuilder:
 
         names += EXTRA_FEATURES
         names += self._retriever_feature_names(
-            source for source in self.retriever_names if source not in _LEGACY_RETRIEVERS
+            source for source in self.retriever_names if source not in _LEGACY_RETRIEVERS and source != "dense_ft"
         )
         names += FULLPOOL_TEXT_FEATURES + STREAK_FEATURES
-        names += [f"{self._safe_name(source)}_rank_pct" for source in self.retriever_names]
+        names += [f"{self._safe_name(source)}_rank_pct" for source in self.retriever_names if source != "dense_ft"]
         names += POOL_AGGREGATE_FEATURES
+        if "dense_ft" in self.retriever_names:
+            names += self._retriever_feature_names(("dense_ft",)) + ["dense_ft_rank_pct"]
 
         return names
 

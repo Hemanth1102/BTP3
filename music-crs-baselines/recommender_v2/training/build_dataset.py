@@ -36,11 +36,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+from recommender_v2.dense_ft.retriever import DenseArtifactError
 from recommender_v2.features import FEATURE_SCHEMA_VERSION, FeatureBuilder, KNOWN_RETRIEVERS
 from recommender_v2.planner import QueryPlanner, QueryState
 from recommender_v2.ranker import RRFRanker
 from recommender_v2.splits import DEV_SPLIT, TRAIN_SPLIT, TURNS
-from recommender_v2.training.turns import get_turn_context
+from recommender_v2.training.turns import get_turn_context, session_query_id
 
 
 DATASET_NAME = "talkpl-ai/TalkPlayData-Challenge-Dataset"
@@ -76,6 +77,7 @@ DEFAULT_MODELS = [
     "item_metadata_decay",
     "item_metadata_max",
     "cooc_track",
+    "dense_ft",
 ]
 
 ALL_MODELS = DEFAULT_MODELS + ["clap"]
@@ -85,7 +87,7 @@ ALL_MODELS = DEFAULT_MODELS + ["clap"]
 # Retrievers
 # ---------------------------------------------------------------------------
 
-def build_retrievers(model_names, device="cpu", text_fields=None, session_bm25_options=None):
+def build_retrievers(model_names, device="cpu", text_fields=None, session_bm25_options=None, dense_ft_options=None):
 
     from recommender_v2 import config as C
 
@@ -118,13 +120,16 @@ def build_retrievers(model_names, device="cpu", text_fields=None, session_bm25_o
         "item_metadata_decay": lambda: build_item(C.build_item_metadata, "decay"),
         "item_metadata_max": lambda: build_item(C.build_item_metadata, "maxsim"),
         "cooc_track": C.build_cooc_track,
+        "dense_ft": lambda: C.build_dense_ft(**(dense_ft_options or {})),
     }
 
+    # Validate the manifest before loading other catalogue indexes.
+    dense = factories["dense_ft"]() if "dense_ft" in model_names else None
     retrievers = []
 
     for name in model_names:       # keep the order the user gave
         print(f"Loading {name}...")
-        r = factories[name]()
+        r = dense if name == "dense_ft" else factories[name]()
         if r.name not in KNOWN_RETRIEVERS:
             raise ValueError(
                 f"Retriever '{r.name}' is not in features.KNOWN_RETRIEVERS."
@@ -195,6 +200,8 @@ def main(argv=None):
     p.add_argument("--candidate-k", type=int, default=100,
                    help="Candidates requested from EACH retriever.")
     p.add_argument("--device", default="cpu")
+    p.add_argument("--dense-ft-dir", default="cache/dense_ft")
+    p.add_argument("--dense-ft-inference", choices=("full", "rrf"), default="full")
     p.add_argument("--planner-model", default="qwen3:8b")
     p.add_argument("--output", default="training_data_train.csv")
     p.add_argument("--resume", action="store_true")
@@ -269,8 +276,10 @@ def main(argv=None):
 
     planner = QueryPlanner(llm=OllamaQwenPlanner(args.planner_model), mode="llm")
 
+    dense_options = ({"dense_ft_options": {"root": args.dense_ft_dir, "inference": args.dense_ft_inference}}
+                     if "dense_ft" in args.models else {})
     recommender = RecommenderV2(
-        retrievers=build_retrievers(args.models, device=args.device, text_fields=args.text_fields),
+        retrievers=build_retrievers(args.models, device=args.device, text_fields=args.text_fields, **dense_options),
         planner=planner,
         candidate_k=args.candidate_k,
         final_k=20,
@@ -356,7 +365,7 @@ def main(argv=None):
             if args.planner_workers > 1:
                 todo = []
                 for turn in range(args.start_turn, args.end_turn + 1):
-                    qid = f"{session_id}:{turn}"
+                    qid = session_query_id(session_id, turn)
                     if qid not in done and qid not in planner_cache:
                         todo.append((qid, turn))
 
@@ -382,7 +391,7 @@ def main(argv=None):
 
             for turn in range(args.start_turn, args.end_turn + 1):
 
-                query_id = f"{session_id}:{turn}"
+                query_id = session_query_id(session_id, turn)
 
                 if query_id in done:
                     continue
@@ -442,6 +451,8 @@ def main(argv=None):
                         anchor_track_ids=ctx.anchor_track_ids,
                         state=state,
                         timings=timings,
+                        session_id=session_id,
+                        turn_number=turn,
                     )
                     retrieve_sec = time.perf_counter() - t_ret
 
@@ -502,6 +513,8 @@ def main(argv=None):
                     n_queries += 1
                     n_fallback += int(used_fallback)
 
+                except DenseArtifactError:
+                    raise
                 except Exception as e:
                     errors.append(f"{query_id}: {e!r}")
                     print(f"  ! skipped {query_id}: {e!r}")

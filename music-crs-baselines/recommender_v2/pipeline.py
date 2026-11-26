@@ -123,6 +123,8 @@ class RecommenderV2:
         session_track_ids=None,
         state: Optional[QueryState] = None,
         timings: Optional[dict] = None,
+        session_id=None,
+        turn_number=None,
     ):
         """
         Plan (unless a precomputed `state` is supplied) and run every
@@ -154,16 +156,22 @@ class RecommenderV2:
             t0 = time.perf_counter()
 
             extra = {}
+            retrieval_anchors = state.anchor_track_ids
             if getattr(retriever, "uses_query_state", False):
                 # artist / album / title lookups read the planner's
                 # structured names, not the search sentence
                 extra["query_state"] = state
+            if getattr(retriever, "uses_turn_context", False):
+                retrieval_query = query
+                retrieval_anchors = anchor_track_ids
+                extra.update(session_id=session_id, turn_number=turn_number,
+                             conversation_history=conversation_history)
 
             retrieval_results[retriever.name] = retriever.retrieve(
                 query=retrieval_query,
                 topk=self.candidate_k,
                 user_id=user_id,
-                anchor_track_ids=state.anchor_track_ids,
+                anchor_track_ids=retrieval_anchors,
                 session_track_ids=self._session_ids(
                     session_track_ids, anchor_track_ids
                 ),
@@ -182,6 +190,8 @@ class RecommenderV2:
         conversation_history=None,
         anchor_track_ids=None,
         session_track_ids=None,
+        session_id=None,
+        turn_number=None,
     ) -> Dict[str, List]:
 
         _, results = self.retrieve_for_ranking(
@@ -190,6 +200,8 @@ class RecommenderV2:
             conversation_history=conversation_history,
             anchor_track_ids=anchor_track_ids,
             session_track_ids=session_track_ids,
+            session_id=session_id,
+            turn_number=turn_number,
         )
 
         return results
@@ -207,7 +219,7 @@ class RecommenderV2:
     # ---------------------------------------------------------
 
     def retrieve_candidates(self, query, user_id=None, conversation_history=None,
-                            anchor_track_ids=None, session_track_ids=None):
+                            anchor_track_ids=None, session_track_ids=None, session_id=None, turn_number=None):
 
         retrieval_results = self.retrieve_all(
             query=query,
@@ -215,12 +227,14 @@ class RecommenderV2:
             conversation_history=conversation_history,
             anchor_track_ids=anchor_track_ids,
             session_track_ids=session_track_ids,
+            session_id=session_id,
+            turn_number=turn_number,
         )
 
         return self.fusion.fuse(list(retrieval_results.values()))
 
     def retrieve_features(self, query, user_id=None, conversation_history=None,
-                          anchor_track_ids=None, session_track_ids=None):
+                          anchor_track_ids=None, session_track_ids=None, session_id=None, turn_number=None):
 
         candidates = self.retrieve_candidates(
             query=query,
@@ -228,6 +242,8 @@ class RecommenderV2:
             conversation_history=conversation_history,
             anchor_track_ids=anchor_track_ids,
             session_track_ids=session_track_ids,
+            session_id=session_id,
+            turn_number=turn_number,
         )
 
         return self.fusion.build_features(candidates)
@@ -305,6 +321,7 @@ class RecommenderV2:
         anchor_track_ids=None,
         session_track_ids=None,
         turn_index=None,
+        session_id=None,
     ) -> List[str]:
 
         state, retrieval_results = self.retrieve_for_ranking(
@@ -313,6 +330,8 @@ class RecommenderV2:
             conversation_history=conversation_history,
             anchor_track_ids=anchor_track_ids,
             session_track_ids=session_track_ids,
+            session_id=session_id,
+            turn_number=turn_index,
         )
 
         return self.recommend_from_retrieval(
