@@ -171,7 +171,7 @@ def check_pipeline(retrievers, directory):
     check(rec.feature_builder.feature_names() == reduced.feature_builder.feature_names() == names
           and full and subset and all(set(row) == {"track_id", *names} for row in full + subset),
           "the full and reduced retriever sets produce identical feature schemas")
-    new_sources = {r.name for r in retrievers if getattr(r, "mode", None) != "mean"} | {"cooc_track"}
+    new_sources = {r.name for r in retrievers if getattr(r, "mode", None) != "mean"} | {"cooc_track", "dense_ft"}
     original = FeatureBuilder(retriever_names=[n for n in KNOWN_RETRIEVERS if n not in new_sources])
     original = original.feature_names()
     original = original[:original.index(FULLPOOL_TEXT_FEATURES[0])]

@@ -18,6 +18,7 @@ from .lexical.title_lookup import TitleLookupRetriever
 from .lexical.anchor_artist import AnchorArtistRetriever
 from .lexical.anchor_album import AnchorAlbumRetriever
 from .lexical.transition_artist import TransitionArtistRetriever
+from ..dense_ft.retriever import DenseFTRetriever
 
 __all__ = [
     "RetrievalResult",
@@ -37,4 +38,5 @@ __all__ = [
     "AnchorArtistRetriever",
     "AnchorAlbumRetriever",
     "TransitionArtistRetriever",
+    "DenseFTRetriever",
 ]

@@ -22,7 +22,7 @@ from recommender_v2.training.build_dataset import (
     build_retrievers,
     load_planner_cache,
 )
-from recommender_v2.training.turns import get_turn_context
+from recommender_v2.training.turns import get_turn_context, session_query_id
 
 
 def measure_recall(sessions, recommender, planner_cache, profile=None):
@@ -39,7 +39,7 @@ def measure_recall(sessions, recommender, planner_cache, profile=None):
 
         for turn in TURNS:
             ctx = get_turn_context(session["conversations"], turn)
-            cached = planner_cache.get(f"{session_id}:{turn}")
+            cached = planner_cache.get(session_query_id(session_id, turn))
             if cached is None or cached.get("fallback"):
                 missing_plans += 1
                 state = QueryState()
@@ -54,6 +54,8 @@ def measure_recall(sessions, recommender, planner_cache, profile=None):
                 conversation_history=ctx.history,
                 anchor_track_ids=ctx.anchor_track_ids,
                 state=state,
+                session_id=session_id,
+                turn_number=turn,
             )
             if profile is not None:
                 profile.collect(recommender, results, state, session.get("user_id"), turn)
@@ -170,6 +172,8 @@ def main(argv=None):
     parser.add_argument("--threads", type=int, default=4, help="CPU threads for PyTorch retrieval.")
     parser.add_argument("--planner-cache-from", nargs="+", type=Path, default=[])
     parser.add_argument("--planner-model", default="qwen3:8b")
+    parser.add_argument("--dense-ft-dir", default="cache/dense_ft")
+    parser.add_argument("--dense-ft-inference", choices=("full", "rrf"), default="full")
     parser.add_argument("--session-bm25-weights", type=int, nargs="+",
                         help="Repeat weights in recency order, one per included anchor.")
     parser.add_argument("--session-bm25-no-tags", action="store_true")
@@ -219,7 +223,8 @@ def main(argv=None):
 
         track_metadata = load_track_metadata()
     recommender = RecommenderV2(
-        build_retrievers(args.models, device="cpu", session_bm25_options=session_bm25_options),
+        build_retrievers(args.models, device="cpu", session_bm25_options=session_bm25_options,
+                         dense_ft_options={"root": args.dense_ft_dir, "inference": args.dense_ft_inference}),
         planner=QueryPlanner(mode="mock"), ranker=RRFRanker(), candidate_k=args.topk,
         track_metadata=track_metadata,
     )

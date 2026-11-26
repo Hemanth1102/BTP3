@@ -100,7 +100,7 @@ def check_resume(directory):
                   [(session["session_id"], True) for session in sessions],
                   "resume selects the held-out fold for every session, including already-built sessions")
     meta = json.loads(Path(str(out) + ".meta.json").read_text(encoding="utf-8"))
-    check(meta["feature_schema_version"] == FEATURE_SCHEMA_VERSION == 2, "dataset records schema version 2")
+    check(meta["feature_schema_version"] == FEATURE_SCHEMA_VERSION, "dataset records the current feature schema version")
     check(not llm.violations, "the existing visibility canary passes with co-occurrence enabled")
 
 

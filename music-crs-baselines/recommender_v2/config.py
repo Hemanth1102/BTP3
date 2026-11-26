@@ -101,6 +101,12 @@ def build_cooc_track(**options):
     return CooccurrenceTrackRetriever(**options)
 
 
+def build_dense_ft(**options):
+    from .retrievers import DenseFTRetriever
+
+    return DenseFTRetriever(**options)
+
+
 def build_artist_lookup():
     return ArtistLookupRetriever(
         dataset_name=ITEM_DATASET,

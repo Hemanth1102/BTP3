@@ -45,6 +45,7 @@ def predict_rows(rows, recommender, limit=0, log=print):
             conversation_history=conv,
             anchor_track_ids=anchors,
             turn_index=turn,
+            session_id=item["session_id"],
         )
 
         out.append({
@@ -67,6 +68,9 @@ def main():
     ap.add_argument("--output", required=True)
     ap.add_argument("--models", nargs="+", default=None)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--dense-ft-dir", default="cache/dense_ft")
+    ap.add_argument("--dense-ft-mode", choices=("live", "precomputed"), default="live")
+    ap.add_argument("--dense-ft-inference", choices=("full", "rrf"), default="full")
     ap.add_argument("--planner-model", default="qwen3:8b")
     ap.add_argument("--candidate-k", type=int, default=100)
     ap.add_argument("--limit", type=int, default=0, help="only the first N rows (smoke test)")
@@ -83,7 +87,10 @@ def main():
     print(f"{args.dataset}[{args.split}]: {len(rows)} rows")
 
     recommender = RecommenderV2(
-        retrievers=build_retrievers(args.models or DEFAULT_MODELS, device=args.device),
+        retrievers=build_retrievers(args.models or DEFAULT_MODELS, device=args.device, dense_ft_options={
+            "root": args.dense_ft_dir, "mode": args.dense_ft_mode, "split": "blind",
+            "inference": args.dense_ft_inference, "device": args.device,
+        }),
         planner=QueryPlanner(llm=OllamaQwenPlanner(args.planner_model), mode="llm"),
         candidate_k=args.candidate_k,
         final_k=20,

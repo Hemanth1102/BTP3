@@ -69,7 +69,8 @@ def main():
 
     state, results = rec.retrieve_for_ranking(
         query=ctx.latest_user_message, user_id=user_id,
-        conversation_history=ctx.history, anchor_track_ids=ctx.anchor_track_ids)
+        conversation_history=ctx.history, anchor_track_ids=ctx.anchor_track_ids,
+        session_id=session["session_id"], turn_number=args.turn)
 
     print("\n=== 2. PLANNER (LLM) OUTPUT ===")
     for k, v in vars(state).items():
