@@ -165,7 +165,11 @@ def evaluate_scores(df, scores, k=20):
 
 
 def query_ndcg(df, scores, k=20):
-    """nDCG@k per query (Series indexed by query_id, misses = 0)."""
+    """
+    nDCG@k per query (Series indexed by query_id, misses = 0).
+    Candidates scored -inf are "not recommended": they never take a slot, so
+    a list shorter than k is not padded with other retrievers' candidates.
+    """
     tmp = pd.DataFrame({
         "query_id": df["query_id"].to_numpy(),
         "label": df["label"].to_numpy(),
@@ -175,7 +179,7 @@ def query_ndcg(df, scores, k=20):
         method="first", ascending=False
     )
     out = pd.Series(0.0, index=pd.Index(tmp["query_id"].unique(), name="query_id"))
-    gold = tmp[(tmp["label"] == 1) & (tmp["pos"] <= k)]
+    gold = tmp[(tmp["label"] == 1) & (tmp["pos"] <= k) & np.isfinite(tmp["score"])]
     out.loc[gold["query_id"].to_numpy()] = 1.0 / np.log2(gold["pos"].to_numpy() + 1.0)
     return out
 
@@ -248,6 +252,24 @@ def report(df, feature_names, scorers):
             verdict = "significant" if lo > 0 else "NOT significant"
             print(f"  lightgbm - {ref}: {m:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]  ({verdict})")
 
+    # Same numbers split by situation (warm vs no user, first turn vs later).
+    qinfo = df.drop_duplicates("query_id").set_index("query_id")
+    groups = []
+    if "has_user" in qinfo:
+        groups += [("with user_id", qinfo["has_user"] == 1),
+                   ("no user_id", qinfo["has_user"] == 0)]
+    if "anchor_count" in qinfo:
+        groups += [("turn 1 (no anchors)", qinfo["anchor_count"] == 0),
+                   ("later turns", qinfo["anchor_count"] > 0)]
+    groups = [(n, m) for n, m in groups if int(m.sum()) > 0]
+    if groups:
+        print("\nnDCG@20 by group (lightgbm | rrf_sum):")
+        for n, mask in groups:
+            ids = per_q["lightgbm"].index.intersection(mask[mask].index)
+            print(f"  {n:<22} queries={len(ids):>5}   "
+                  f"{per_q['lightgbm'].loc[ids].mean():.4f} | "
+                  f"{per_q['rrf_sum'].loc[ids].mean():.4f}")
+
 
 def run_eval(df, feature_names, model_dir):
     """Score a held-out dataset with a saved model (no training)."""
@@ -255,11 +277,14 @@ def run_eval(df, feature_names, model_dir):
 
     model_dir = Path(model_dir)
     saved = json.loads((model_dir / "ranker_features.json").read_text())
-    if saved != feature_names:
-        sys.exit("Model and dataset feature schemas differ; rebuild the dataset "
-                 "with the same code version.")
+    absent = [f for f in saved if f not in df.columns]
+    if absent:
+        sys.exit(f"The dataset lacks {len(absent)} features the model was trained on "
+                 f"(e.g. {absent[:5]}); rebuild/upgrade the dataset with the same code "
+                 f"version. (Extra columns in the dataset are fine: only the model's "
+                 f"features are used.)")
     model = lgb.Booster(model_file=str(model_dir / "ranker.txt"))
-    scores = model.predict(df[feature_names])
+    scores = model.predict(df[saved])
 
     m = evaluate_scores(df, scores)
     print("\nOfficial-style metrics (single gold track per query):")
@@ -271,9 +296,13 @@ def run_eval(df, feature_names, model_dir):
 
 
 def retriever_baseline_scores(df, retriever):
-    """Order by one retriever's rank; candidates it did not return go last."""
+    """
+    That retriever's own list, nothing else. Candidates it did not return are
+    -inf (not recommended); padding them in pool order would credit this
+    retriever with other retrievers' hits.
+    """
     rank = df[f"{retriever}_rank"].to_numpy(dtype=np.float64)
-    return np.where(np.isnan(rank), -1e9, -rank)
+    return np.where(np.isnan(rank), -np.inf, -rank)
 
 
 # ---------------------------------------------------------------------------

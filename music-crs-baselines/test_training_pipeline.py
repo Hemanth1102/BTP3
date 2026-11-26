@@ -353,6 +353,19 @@ def main():
     ev = buf.getvalue()
     check("Official-style metrics" in ev and "lightgbm - rrf_sum" in ev,
           "--eval-model scores a dataset with a saved model")
+    check("nDCG@20 by group" in ev and "no user_id" in ev or "with user_id" in ev,
+          "report splits nDCG by user / turn-1 groups")
+
+    # a dataset with EXTRA columns (newer schema) can still be scored by an older model
+    wider = tmp / "wider.csv"
+    pd.read_csv(out).assign(brand_new_feature=1.0).to_csv(wider, index=False)
+    Path(str(wider) + ".meta.json").write_text(Path(str(out) + ".meta.json").read_text().replace(
+        '"feature_names": [', '"feature_names": ["brand_new_feature", ', 1))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        train_ranker.main(["--train", str(wider), "--eval-model", str(final_dir)])
+    check("Official-style metrics" in buf.getvalue(),
+          "--eval-model accepts a dataset with extra feature columns")
 
     print("\n[anchor-artist retriever + continuity features]")
     # Load the module by path: the lexical package __init__ pulls in bm25s.
@@ -537,6 +550,261 @@ def main():
           "turn number taken from the last message; 20 tracks each")
     check(len(llm.violations) == v_before, "planner prompts contain nothing from the target turn or later")
     check(res[3]["user_id"] is None, "missing user_id handled")
+
+    print("\n[extra features: embedding similarity, user affinity, pool features]")
+    from recommender_v2.features import EXTRA_FEATURES
+
+    # 4 tracks in a 2-D space: t0 = (1,0), t1 = (0,1), t2 = (1,1), t3 = (-1,0)
+    emb = np.array([[1, 0], [0, 1], [1, 1], [-1, 0]], dtype=np.float32)
+    index = {"t0": 0, "t1": 1, "t2": 2, "t3": 3}
+    fb = FeatureBuilder(track_metadata={
+        "t0": {"artist_names": ["A"], "popularity": 10.0},
+        "t1": {"artist_names": ["A"], "popularity": 30.0},
+        "t2": {"artist_names": ["B"], "popularity": 20.0},
+        "t3": {"artist_names": ["C"], "popularity": 40.0},
+    })
+    fb._spaces = {"cf": (emb, index), "clap": (emb, index), "meta": (emb, index)}
+    fb._user_space = ({"u1": np.array([2.0, 0.0], dtype=np.float32)}, emb, index)
+
+    rows = [{"track_id": t, "candidate_popularity": fb.track_metadata.get(t, {}).get("popularity", float("nan"))}
+            for t in ("t1", "t2", "t3", "tX")]
+    fb.add_extra_features(rows, user_id="u1", anchor_track_ids=["t0"],
+                          metadata_lookup=fb.track_metadata)
+    by = {r["track_id"]: r for r in rows}
+    check(all(n in rows[0] for n in EXTRA_FEATURES), "every extra feature is set")
+    check(abs(by["t1"]["emb_cf_centroid_sim"]) < 1e-6, "orthogonal track has cosine 0")
+    check(abs(by["t2"]["emb_cf_last_sim"] - 2 ** -0.5) < 1e-5, "45-degree track has cosine 0.707")
+    check(abs(by["t3"]["emb_cf_max_sim"] + 1.0) < 1e-6, "opposite track has cosine -1")
+    check(abs(by["t2"]["user_cf_sim"] - 2 ** -0.5) < 1e-5, "user affinity is a cosine")
+    check(np.isnan(by["tX"]["emb_cf_centroid_sim"]) and np.isnan(by["tX"]["user_cf_sim"]),
+          "track without an embedding -> NaN")
+    check(by["t1"]["artist_track_count"] == 2.0 and by["t3"]["artist_track_count"] == 1.0,
+          "artist catalogue size counted")
+    check(by["t3"]["popularity_rank_in_pool"] > by["t1"]["popularity_rank_in_pool"]
+          > by["t2"]["popularity_rank_in_pool"], "popularity percentile increases with popularity")
+
+    # several anchors: max over anchors, last anchor is the most recent one
+    rows = [{"track_id": t, "candidate_popularity": float("nan")} for t in ("t2",)]
+    fb.add_extra_features(rows, user_id=None, anchor_track_ids=["t1", "t0"])
+    check(abs(rows[0]["emb_meta_last_sim"] - 2 ** -0.5) < 1e-5, "last = most recent anchor (t0)")
+    check(np.isnan(rows[0]["user_cf_sim"]), "no user -> user_cf_sim NaN")
+    check(np.isnan(rows[0]["popularity_rank_in_pool"]), "unknown popularity -> NaN")
+
+    # turn 1: no anchors -> similarity features NaN, others unaffected
+    rows = [{"track_id": "t2", "candidate_popularity": 20.0}]
+    fb.add_extra_features(rows, user_id="u1", anchor_track_ids=[])
+    check(all(np.isnan(rows[0][f"emb_{k}_{m}"]) for k in ("cf", "clap", "meta")
+              for m in ("centroid_sim", "last_sim", "max_sim")), "no anchors -> similarities NaN")
+    check(not np.isnan(rows[0]["user_cf_sim"]), "user affinity still available at turn 1")
+
+    # builder without embeddings still yields the full schema (all NaN)
+    plain = FeatureBuilder()
+    rows = [{"track_id": "t0"}]
+    plain.add_extra_features(rows, anchor_track_ids=["t1"])
+    check(all(n in rows[0] for n in EXTRA_FEATURES), "schema complete without embeddings")
+
+    # user dropout: per-session, deterministic, user_id blank and has_user = 0 together
+    outs = []
+    for k in range(2):
+        d = tmp / f"drop{k}"
+        d.mkdir()
+        outs.append(pd.read_csv(run_builder(d, llm, 40, extra=["--user-dropout", "0.5"])))
+    a_, b_ = outs
+    frac = a_.groupby("session_id")["user_id"].apply(lambda x: x.isna().all()).mean()
+    check(0.2 < frac < 0.8, f"about half the sessions lose their user_id (got {frac:.2f})")
+    check(a_["user_id"].isna().equals(b_["user_id"].isna()), "dropout identical on rerun")
+    check(((a_["has_user"] == 0) == a_["user_id"].isna()).all(), "has_user = 0 exactly when user_id is blank")
+    mixed = a_.groupby("session_id")["user_id"].apply(lambda x: x.isna().any() and x.notna().any()).any()
+    check(not mixed, "dropout never splits a session")
+
+    print("\n[add_features.py: upgrade an existing dataset without retrieval]")
+    import add_features
+    from recommender_v2.features import EXTRA_FEATURES as _EX
+    d = tmp / "upg"
+    d.mkdir()
+    built = run_builder(d, llm, 6)
+    # simulate an OLD dataset: same file without the newer columns
+    src = d / "old.csv"
+    pd.read_csv(built).drop(columns=_EX).to_csv(src, index=False)
+    m_ = json.loads(Path(str(built) + ".meta.json").read_text())
+    m_["feature_names"] = [f for f in m_["feature_names"] if f not in _EX]
+    Path(str(src) + ".meta.json").write_text(json.dumps(m_))
+    # give the fake retrievers real embeddings so values can be checked
+    ids_all = sorted(pd.read_csv(src)["track_id"].unique())
+    rng = np.random.RandomState(0)
+    emb_ = rng.randn(len(ids_all), 8).astype(np.float32)
+    idx_ = {t: i for i, t in enumerate(ids_all)}
+
+    class _R:
+        def __init__(self, name):
+            self.name, self.track_embeddings, self.track_to_index = name, emb_, idx_
+    fake_set = [_R("item_cf_bpr"), _R("item_clap"), _R("item_metadata")]
+    build_dataset.build_retrievers = lambda names, device="cpu", text_fields=None: fake_set
+    dst = d / "upgraded.csv"
+    sys.argv = ["add_features.py", "--input", str(src), "--output", str(dst)]
+    add_features.main()
+    up = pd.read_csv(dst)
+    base = pd.read_csv(src)
+    check(len(up) == len(base) and (up["track_id"].values == base["track_id"].values).all(),
+          "same rows in the same order")
+    check(all(c in up.columns for c in _EX), "all extra feature columns added")
+    later = up[up["turn_number"] > 1]
+    check(later["emb_cf_centroid_sim"].notna().all(), "similarity present from turn 2 on")
+    check(up[up["turn_number"] == 1]["emb_cf_centroid_sim"].isna().all(), "turn 1 has no anchors -> NaN")
+    check(set(json.loads(Path(str(dst) + ".meta.json").read_text())["feature_names"]) >= set(_EX),
+          "meta.json lists the new features")
+    # the value for one row matches a direct computation
+    print("\n[slim QueryState: unused planner fields removed]")
+    from recommender_v2.planner.schema import LEGACY_FIELDS, LLM_FIELDS, QueryState as QS
+    from recommender_v2.planner.planner import QueryPlanner as QP
+    prompt = QP(llm=lambda p: "{}", mode="llm")._build_prompt("hi", [], [])
+    check(not any(f'"{f}"' in prompt for f in LEGACY_FIELDS), "prompt no longer asks for retired fields")
+    check(all(f'"{f}"' in prompt for f in LLM_FIELDS), "prompt asks for every remaining field")
+    check(set(QS().to_dict()) == set(LLM_FIELDS) | {"raw_query", "anchor_track_ids"},
+          "QueryState = LLM fields + pipeline fields")
+    slim = {f: QS().to_dict()[f] for f in LLM_FIELDS}
+    old = dict(slim, mood_phrases=["calm"], rejected_track_ids=[], mentioned_entities=["x"])
+    parser = QP(mode="llm", llm=lambda p: "{}")
+    check(parser._parse_json(json.dumps(old)).keys() == slim.keys(), "old-format plan accepted, retired fields dropped")
+    check(QS.from_dict(old).to_dict()["artist_names"] == [], "from_dict ignores retired fields")
+    try:
+        parser._parse_json(json.dumps(dict(slim, made_up=1)))
+        check(False, "unknown field rejected")
+    except ValueError:
+        check(True, "unknown field rejected")
+    import importlib.util as _iu
+    _spec = _iu.spec_from_file_location("recommender_v2.planner._ollama_real",
+                                        ROOT / "recommender_v2" / "planner" / "ollama.py")
+    _ol = _iu.module_from_spec(_spec)
+    _spec.loader.exec_module(_ol)
+    check(set(_ol.query_state_schema()["properties"]) == set(LLM_FIELDS), "Ollama JSON schema matches QueryState")
+
+    # plans cached by the previous planner version (tag v2) are still reused
+    d = tmp / "v2cache"
+    d.mkdir()
+    first = run_builder(d, llm, 4)
+    cache_file = Path(str(first) + ".planner.jsonl")
+    lines = [json.loads(l) for l in cache_file.read_text().splitlines()]
+    for r in lines:
+        r["planner"] = r["planner"].replace("|v3", "|v2")
+        r["state"].update(mood_phrases=[], negative_constraints=[], rejected_track_ids=[])
+    old_cache = d / "old.planner.jsonl"
+    old_cache.write_text("\n".join(json.dumps(r) for r in lines))
+    d2 = tmp / "v2cache_rebuild"
+    d2.mkdir()
+    calls_before = llm.calls
+    run_builder(d2, llm, 4, extra=["--planner-cache-from", str(old_cache)])
+    check(llm.calls == calls_before, "v2-tagged cached plans reused: no LLM calls")
+    meta2 = json.loads(Path(str(d2 / "train.csv") + ".meta.json").read_text())
+    check(any("|v2" in t for t in meta2.get("planner_tags_reused_from_cache", [])),
+          "meta.json records that v2 plans were reused")
+
+    print("\n[artist / album / title lookups read the structured QueryState]")
+    lex_dir = ROOT / "recommender_v2" / "retrievers" / "lexical"
+    if "recommender_v2.retrievers.lexical" not in sys.modules or \
+            not hasattr(sys.modules["recommender_v2.retrievers.lexical"], "ArtistLookupRetriever"):
+        lexpkg = types.ModuleType("recommender_v2.retrievers.lexical")
+        lexpkg.__path__ = [str(lex_dir)]
+        sys.modules["recommender_v2.retrievers.lexical"] = lexpkg
+    al = importlib.import_module("recommender_v2.retrievers.lexical.artist_lookup")
+    bl = importlib.import_module("recommender_v2.retrievers.lexical.album_lookup")
+    tl = importlib.import_module("recommender_v2.retrievers.lexical.title_lookup")
+    catalog = [
+        {"track_id": "b1", "track_name": "Halo", "artist_name": ["Beyoncé"], "album_name": "I Am", "popularity": 50},
+        {"track_id": "b2", "track_name": "Crazy in Love", "artist_name": ["Beyoncé"], "album_name": "Dangerously", "popularity": 90},
+        {"track_id": "b3", "track_name": "Single Ladies", "artist_name": ["Beyoncé"], "album_name": "I Am", "popularity": 70},
+        {"track_id": "r1", "track_name": "Creep", "artist_name": ["Radiohead"], "album_name": "Pablo Honey", "popularity": 80},
+        {"track_id": "r2", "track_name": "Creep (Remastered 2009)", "artist_name": ["Radiohead"], "album_name": "Greatest Hits", "popularity": 40},
+        {"track_id": "t1", "track_name": "Creep", "artist_name": ["TLC"], "album_name": "CrazySexyCool", "popularity": 60},
+        {"track_id": "x1", "track_name": "Yesterday", "artist_name": ["The Beatles"], "album_name": "Help!", "popularity": 85},
+        {"track_id": "x2", "track_name": "Hey Jude", "artist_name": ["The Beatles"], "album_name": "Greatest Hits", "popularity": 95},
+        {"track_id": "c1", "track_name": "Vitamin C", "artist_name": ["Can"], "album_name": "Ege Bamyasi", "popularity": 30},
+    ]
+    for mod in (al, bl, tl):
+        mod.load_catalog = lambda name, splits: catalog
+    A = al.ArtistLookupRetriever("x", ["all"])
+    B = bl.AlbumLookupRetriever("x", ["all"])
+    T = tl.TitleLookupRetriever("x", ["all"])
+    QS_ = QS
+    ids = lambda res: [r.track_id for r in res]
+
+    st = QS_(raw_query="something chill", semantic_query="calm r&b", artist_names=["Beyonce"])
+    got = A.retrieve(query=st.semantic_query, query_state=st)
+    check(ids(got) == ["b2", "b3", "b1"], "artist from artist_names (accent-insensitive), most popular first")
+    check(got[0].score == 1.0, "exact structured match scores 1.0")
+    check(ids(A.retrieve("", query_state=QS_(artist_names=["Beyonse"]))) == ["b2", "b3", "b1"], "misspelt name found by fuzzy match")
+    check(A.retrieve("", query_state=QS_(artist_names=["Beyonse"]))[0].score == 0.9, "fuzzy match scores 0.9")
+    check(ids(A.retrieve("", query_state=QS_(artist_names=["Beatles"]))) == ["x2", "x1"], "leading 'the' ignored")
+    two = ids(A.retrieve("", query_state=QS_(artist_names=["Radiohead", "Beyonce"])))
+    check(two[:2] == ["r1", "b2"], "two artists share the slots (interleaved)")
+    st = QS_(raw_query="play some radiohead please", semantic_query="moody rock")
+    check(ids(A.retrieve(st.semantic_query, query_state=st)) == ["r1", "r2"], "fallback: name found in the user's message")
+    check(A.retrieve(st.semantic_query, query_state=st)[0].score == 0.7, "text fallback scores 0.7")
+    st = QS_(raw_query="I can listen to anything", semantic_query="anything")
+    check(A.retrieve("anything", query_state=st) == [], "common word 'can' is not taken as the band Can")
+    st = QS_(raw_query="nice, but not Radiohead again", rejected_artists=["Radiohead"])
+    check(A.retrieve("", query_state=st) == [], "rejected artist never returned (even via the text fallback)")
+    st = QS_(artist_names=["Beyonce"])
+    check("b2" not in ids(A.retrieve("", query_state=st, session_track_ids=["b2"])), "already-played tracks skipped")
+    check(ids(A.retrieve("", query_state=st, topk=2)) == ["b2", "b3"], "topk keeps the most popular")
+    check(ids(A.retrieve("radiohead")) == ["r1", "r2"], "works without a QueryState (plain text)")
+    check(A.retrieve("", query_state=QS_(artist_names=["Nobody Known"])) == [], "unknown artist -> nothing")
+
+    st = QS_(album_names=["Greatest Hits"], artist_names=["The Beatles"])
+    got = B.retrieve("", query_state=st)
+    check(ids(got)[0] == "x2" and got[0].score == 1.0, "album shared by artists: the named artist's track first")
+    check(got[-1].track_id == "r2" and got[-1].score < 1.0, "other artists' album tracks after, scored lower")
+    check(ids(B.retrieve("", query_state=QS_(album_names=["i am"]))) == ["b3", "b1"], "album tracks by popularity")
+
+    st = QS_(track_titles=["Creep"], artist_names=["Radiohead"])
+    got = T.retrieve("", query_state=st)
+    check(ids(got)[:2] == ["r1", "r2"], "title + artist: that artist's versions first (incl. 'Remastered' version)")
+    check("t1" in ids(got) and got[ids(got).index("t1")].score < 1.0, "same title by another artist kept, scored lower")
+    check(ids(T.retrieve("", query_state=QS_(track_titles=["creep"])))[0] == "r1", "title alone: most popular version first")
+    check(T.retrieve("", query_state=QS_(raw_query="play creep")) == [], "no title text fallback")
+
+    print("\n[pipeline gives the lookups the whole QueryState]")
+    seen = {}
+
+    class _Probe:
+        name = "artist_lookup"
+        uses_query_state = True
+
+        def retrieve(self, query, topk=100, user_id=None, anchor_track_ids=None,
+                     session_track_ids=None, query_state=None):
+            seen["state"] = query_state
+            return []
+    rp = RecommenderV2(retrievers=[_Probe()], planner=QueryPlanner(mode="mock"), ranker=RRFRanker())
+    st = QS_(raw_query="q", semantic_query="q", artist_names=["Adele"])
+    rp.retrieve_for_ranking(query="q", state=st)
+    check(seen.get("state") is st, "lookup retriever received query_state")
+
+    print("\n[title / artist features]")
+    fbt = FeatureBuilder()
+    meta = {"artist_names": ["Beyoncé"], "album_names": ["I Am"], "genres": [],
+            "year": 2008, "track_name": "Halo (Live)"}
+    row = {}
+    fbt._add_metadata_features(row, meta, QS_(artist_names=["beyonce"], track_titles=["Halo"]))
+    check(row["artist_match"] == 1.0, "artist_match is accent-insensitive")
+    check(row["title_match"] == 1.0, "title_match ignores '(Live)'-style suffixes")
+    row = {}
+    fbt._add_metadata_features(row, meta, QS_(track_titles=[]))
+    check(row["title_match"] == 0.0, "no requested title -> title_match 0")
+    names = FeatureBuilder().feature_names()
+    check("title_match" in names and "n_planner_titles" in names and "title_lookup_rank" in names,
+          "schema has title_lookup columns, title_match, n_planner_titles")
+
+    print("\n[single-retriever baselines are not padded]")
+    _df = pd.DataFrame({
+        "query_id": ["q1"] * 3,
+        "label": [0, 0, 1],
+        "empty_rank": [np.nan, np.nan, np.nan],
+        "short_rank": [1.0, np.nan, np.nan],
+    })
+    zero = train_ranker.query_ndcg(_df, train_ranker.retriever_baseline_scores(_df, "empty"))
+    check(float(zero.iloc[0]) == 0.0, "retriever that returned nothing scores 0 (was: pool order)")
+    short = train_ranker.query_ndcg(_df, train_ranker.retriever_baseline_scores(_df, "short"))
+    check(float(short.iloc[0]) == 0.0, "gold outside a short list is a miss, not a padded hit")
 
     print("\n[RRF baseline]")
     rows = [{"bm25_rank": 1.0, "cf_bpr_rank": float("nan"), "best_rank": 1.0, "mean_rank": 1.0},

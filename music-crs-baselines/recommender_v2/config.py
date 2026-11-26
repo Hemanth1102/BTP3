@@ -113,3 +113,11 @@ def build_transition_artist():
         dataset_name=ITEM_DATASET,
         split_types=["all_tracks"],
     )
+
+def build_title_lookup():
+    from .retrievers.lexical.title_lookup import TitleLookupRetriever
+
+    return TitleLookupRetriever(
+        dataset_name=ITEM_DATASET,
+        split_types=["all_tracks"],
+    )

@@ -119,6 +119,11 @@ def build_recommender(
             build_album_lookup()
         )
 
+    if "title" in model_names:
+        from recommender_v2.config import build_title_lookup
+        print("Loading Title Lookup...")
+        retrievers.append(build_title_lookup())
+
     if "anchor" in model_names:
         from recommender_v2.config import build_anchor_artist
         print("Loading Anchor Artist...")
@@ -563,6 +568,7 @@ def main():
             "item_metadata",
             "artist",
             "album",
+            "title",
             "anchor",
             "transition",
         ]

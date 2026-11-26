@@ -63,6 +63,7 @@ DEFAULT_MODELS = [
     "item_metadata",
     "artist",
     "album",
+    "title",
     "anchor",
     "transition",
 ]
@@ -88,6 +89,7 @@ def build_retrievers(model_names, device="cpu", text_fields=None):
         "item_metadata": lambda: C.build_item_metadata(),
         "artist": lambda: C.build_artist_lookup(),
         "album": lambda: C.build_album_lookup(),
+        "title": lambda: C.build_title_lookup(),
         "anchor": lambda: C.build_anchor_artist(),
         "transition": lambda: C.build_transition_artist(),
     }
@@ -110,11 +112,13 @@ def build_retrievers(model_names, device="cpu", text_fields=None):
 # Planner cache
 # ---------------------------------------------------------------------------
 
-def load_planner_cache(path, tag: str, extra_paths=()) -> Dict[str, dict]:
+def load_planner_cache(path, tag, extra_paths=()) -> Dict[str, dict]:
     """
-    Only plans produced with the same planner settings (`tag`) are reused, so
-    switching model or prompt layout can never silently mix plans in one dataset.
+    Only plans produced with compatible planner settings (`tag`: one tag or a
+    tuple of tags) are reused, so switching model or prompt layout can never
+    silently mix incompatible plans in one dataset.
     """
+    tags = {tag} if isinstance(tag, str) else set(tag)
     cache = {}
     skipped = 0
     for src in [*extra_paths, path]:          # own cache last: it wins
@@ -127,7 +131,7 @@ def load_planner_cache(path, tag: str, extra_paths=()) -> Dict[str, dict]:
                 if not line:
                     continue
                 rec = json.loads(line)
-                if rec.get("planner") == tag:
+                if rec.get("planner") in tags:
                     cache[rec["query_id"]] = rec
                 else:
                     skipped += 1
@@ -180,6 +184,10 @@ def main(argv=None):
     p.add_argument("--text-fields", nargs="+", default=None,
                    help="Catalog fields indexed by BM25/BGE (default: track_name "
                         "artist_name album_name release_date). Example: add tag_list.")
+    p.add_argument("--user-dropout", type=float, default=0.0,
+                   help="Fraction of sessions (0-1) built WITHOUT user_id, so the ranker "
+                        "also learns cold / ultra-cold sessions. Chosen per session by a "
+                        "hash, so reruns are identical. Use only for training data.")
     p.add_argument("--no-metadata", action="store_true",
                    help="Skip catalog metadata (artist/album/genre/year features become NaN).")
     p.add_argument("--max-fallback-rate", type=float, default=0.05,
@@ -245,10 +253,15 @@ def main(argv=None):
     )
 
     # Identifies the planner configuration that produced a cached plan.
-    planner_tag = f"{args.planner_model}|query=latest_user|v2"
+    # v3 = slim schema (unused fields removed, field meanings in the prompt).
+    # v2 plans are reused when cached: their extra fields are dropped and the
+    # fields they share mean the same thing, so no LLM re-run is needed.
+    planner_tag = f"{args.planner_model}|query=latest_user|v3"
+    compatible_tags = (planner_tag, f"{args.planner_model}|query=latest_user|v2")
     planner_cache = load_planner_cache(
-        cache_path, planner_tag, extra_paths=args.planner_cache_from or []
+        cache_path, compatible_tags, extra_paths=args.planner_cache_from or []
     )
+    reused_tags = sorted({r.get("planner") for r in planner_cache.values()})
     if args.planner_cache_from:
         print(f"Planner cache: {len(planner_cache)} plans available (incl. imported).")
 
@@ -291,6 +304,11 @@ def main(argv=None):
 
             session_id = session["session_id"]
             user_id = session["user_id"]
+            if args.user_dropout > 0:
+                import hashlib
+                h = int(hashlib.md5(f"userdrop:{session_id}".encode()).hexdigest(), 16)
+                if (h % 10000) < args.user_dropout * 10000:
+                    user_id = None
 
             # Retrievers that learn from the training sessions must not see this
             # session's own data when it is a training session.
@@ -344,7 +362,7 @@ def main(argv=None):
                     cached = planner_cache.get(query_id)
 
                     if cached is not None:
-                        state = QueryState(**cached["state"])
+                        state = QueryState.from_dict(cached["state"])
                         used_fallback = bool(cached.get("fallback", False))
                         state.anchor_track_ids = list(ctx.anchor_track_ids)
                     else:
@@ -411,7 +429,7 @@ def main(argv=None):
                         row = dict(r)
                         row["query_id"] = query_id
                         row["session_id"] = session_id
-                        row["user_id"] = user_id
+                        row["user_id"] = user_id if user_id is not None else ""
                         row["turn_number"] = turn
                         row["label"] = int(r["track_id"] == gold)
                         row["query_has_positive"] = has_positive
@@ -503,6 +521,7 @@ def main(argv=None):
         "candidate_k": args.candidate_k,
         "planner_model": args.planner_model,
         "planner_tag": planner_tag,
+        "planner_tags_reused_from_cache": reused_tags,
         "metadata_features": not args.no_metadata,
         "meta_columns": META_COLUMNS,
         "feature_names": feature_names,

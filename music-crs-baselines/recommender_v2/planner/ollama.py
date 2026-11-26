@@ -26,22 +26,18 @@ def query_state_schema() -> Dict[str, Any]:
         "album_names": texts,
         "track_titles": texts,
         "genre_tags": texts,
-        "mood_phrases": texts,
-        "sonic_descriptors": texts,
-        "lyrical_themes": texts,
-        "year_terms": texts,
         "min_year": year,
         "max_year": year,
-        "rejected_track_ids": texts,
         "rejected_artists": texts,
         "intent": {"type": "string", "enum": list(INTENTS)},
         "need_personalization": {"type": "boolean"},
         "need_new_artist": {"type": "boolean"},
         "need_new_track": {"type": "boolean"},
-        "negative_constraints": texts,
-        "mentioned_entities": texts,
         "planner_confidence": {"type": "number"},
     }
+
+    from .schema import LLM_FIELDS
+    assert set(properties) == set(LLM_FIELDS), "JSON schema out of sync with QueryState"
 
     return {
         "type": "object",

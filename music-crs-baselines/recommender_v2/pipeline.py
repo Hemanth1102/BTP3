@@ -64,6 +64,9 @@ class RecommenderV2:
         self.feature_builder = feature_builder or FeatureBuilder(
             track_metadata=track_metadata
         )
+        # Lets the feature builder score every candidate against the played
+        # tracks using the embedding matrices the retrievers already loaded.
+        self.feature_builder.attach_embeddings(self.retrievers)
 
         # Ranker: explicit object > model file > RRF fallback.
         # (Building the dataset must work before any model has been trained.)
@@ -150,6 +153,12 @@ class RecommenderV2:
 
             t0 = time.perf_counter()
 
+            extra = {}
+            if getattr(retriever, "uses_query_state", False):
+                # artist / album / title lookups read the planner's
+                # structured names, not the search sentence
+                extra["query_state"] = state
+
             retrieval_results[retriever.name] = retriever.retrieve(
                 query=retrieval_query,
                 topk=self.candidate_k,
@@ -158,6 +167,7 @@ class RecommenderV2:
                 session_track_ids=self._session_ids(
                     session_track_ids, anchor_track_ids
                 ),
+                **extra,
             )
 
             if timings is not None:

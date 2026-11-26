@@ -1,5 +1,9 @@
 import math
 import re
+
+import numpy as np
+
+from .text_norm import base_title_norm, normalize_name
 from typing import Any, Dict, List, Optional
 
 
@@ -17,6 +21,7 @@ KNOWN_RETRIEVERS = [
     "item_metadata",
     "artist_lookup",
     "album_lookup",
+    "title_lookup",
     "anchor_artist",
     "transition_artist",
 ]
@@ -24,7 +29,7 @@ KNOWN_RETRIEVERS = [
 QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio"]
 PERSONALIZED_RETRIEVERS = ["cf_bpr"]
 ITEM_TO_ITEM_RETRIEVERS = ["item_cf_bpr", "item_clap", "item_metadata"]
-ENTITY_RETRIEVERS = ["artist_lookup", "album_lookup"]
+ENTITY_RETRIEVERS = ["artist_lookup", "album_lookup", "title_lookup"]
 
 INTENTS = [
     "discovery",
@@ -39,6 +44,33 @@ INTENTS = [
 ]
 
 NAN = float("nan")
+
+# Provided embedding spaces used for "similarity to the session's played tracks"
+# features. key -> retriever that already holds the (normalised) track matrix.
+EMBEDDING_SPACES = {
+    "cf": "item_cf_bpr",
+    "clap": "item_clap",
+    "meta": "item_metadata",
+}
+
+EXTRA_FEATURES = (
+    [f"emb_{k}_{kind}" for k in EMBEDDING_SPACES
+     for kind in ("centroid_sim", "last_sim", "max_sim")]
+    + ["user_cf_sim", "artist_track_count", "popularity_rank_in_pool"]
+)
+
+
+def _take(matrix, idx):
+    """Rows `idx` of a torch tensor / numpy array as float32 numpy (idx=None: whole array)."""
+    x = matrix if idx is None else matrix[idx]
+    if hasattr(x, "detach"):
+        x = x.detach().cpu().numpy()
+    return np.asarray(x, dtype=np.float32)
+
+
+def _unit_rows(x):
+    n = np.linalg.norm(x, axis=1, keepdims=True)
+    return x / np.where(n > 0, n, 1.0)
 
 
 def _norm(value: Any) -> str:
@@ -89,6 +121,9 @@ class FeatureBuilder:
     ):
         self.retriever_names = list(retriever_names or KNOWN_RETRIEVERS)
         self.track_metadata = track_metadata or {}
+        self._spaces = {}          # key -> (matrix, {track_id: row})
+        self._user_space = None    # (user_embeddings, track matrix, {track_id: row})
+        self._artist_counts = None
 
     # =========================================================
     # Schema
@@ -141,9 +176,11 @@ class FeatureBuilder:
             "n_planner_artists",
             "n_planner_albums",
             "n_planner_genres",
+            "n_planner_titles",
             "has_year_constraint",
             "artist_match",
             "album_match",
+            "title_match",
             "genre_match",
             "rejected_artist_match",
             "year_in_range",
@@ -157,6 +194,8 @@ class FeatureBuilder:
             "anchor_tag_overlap",
             "year_gap_to_anchors",
         ]
+
+        names += EXTRA_FEATURES
 
         return names
 
@@ -257,6 +296,13 @@ class FeatureBuilder:
                 row.setdefault(name, NAN)
 
             rows.append(row)
+
+        self.add_extra_features(
+            rows,
+            user_id=user_id,
+            anchor_track_ids=anchor_track_ids,
+            metadata_lookup=metadata_lookup,
+        )
 
         return rows
 
@@ -415,6 +461,7 @@ class FeatureBuilder:
                 "n_planner_artists",
                 "n_planner_albums",
                 "n_planner_genres",
+                "n_planner_titles",
                 "has_year_constraint",
             ):
                 row[name] = NAN
@@ -441,6 +488,7 @@ class FeatureBuilder:
         row["n_planner_artists"] = float(len(getattr(query_state, "artist_names", []) or []))
         row["n_planner_albums"] = float(len(getattr(query_state, "album_names", []) or []))
         row["n_planner_genres"] = float(len(getattr(query_state, "genre_tags", []) or []))
+        row["n_planner_titles"] = float(len(getattr(query_state, "track_titles", []) or []))
 
         row["has_year_constraint"] = float(
             _to_int(getattr(query_state, "min_year", None)) is not None
@@ -457,6 +505,7 @@ class FeatureBuilder:
             for name in (
                 "artist_match",
                 "album_match",
+                "title_match",
                 "genre_match",
                 "rejected_artist_match",
                 "year_in_range",
@@ -479,19 +528,35 @@ class FeatureBuilder:
         if query_state is None:
             row["artist_match"] = NAN
             row["album_match"] = NAN
+            row["title_match"] = NAN
             row["genre_match"] = NAN
             row["rejected_artist_match"] = NAN
             row["year_in_range"] = NAN
             return
 
-        p_artists = _norm_set(getattr(query_state, "artist_names", None))
-        p_albums = _norm_set(getattr(query_state, "album_names", None))
-        p_genres = _norm_set(getattr(query_state, "genre_tags", None))
-        p_rejected = _norm_set(getattr(query_state, "rejected_artists", None))
+        # Same normalisation as the lookup retrievers (case, accents,
+        # punctuation, leading "the"), so "Beyoncé" == "beyonce".
+        def names(values):
+            return {normalize_name(v) for v in (values or [])} - {""}
 
-        row["artist_match"] = float(bool(artists & p_artists))
-        row["album_match"] = float(bool(albums & p_albums))
-        row["rejected_artist_match"] = float(bool(artists & p_rejected))
+        c_artists = names(metadata.get("artist_names"))
+        c_albums = names(metadata.get("album_names"))
+        p_artists = names(getattr(query_state, "artist_names", None))
+        p_albums = names(getattr(query_state, "album_names", None))
+        p_titles = names(getattr(query_state, "track_titles", None))
+        p_genres = _norm_set(getattr(query_state, "genre_tags", None))
+        p_rejected = names(getattr(query_state, "rejected_artists", None))
+
+        row["artist_match"] = float(bool(c_artists & p_artists))
+        row["album_match"] = float(bool(c_albums & p_albums))
+        row["rejected_artist_match"] = float(bool(c_artists & p_rejected))
+
+        title = normalize_name(metadata.get("track_name"))
+        if not title:
+            row["title_match"] = NAN
+        else:
+            row["title_match"] = float(bool(p_titles) and (
+                title in p_titles or base_title_norm(metadata.get("track_name")) in p_titles))
 
         # Genre/tag vocabularies rarely match exactly ("indie rock" vs "rock"),
         # so allow containment either way for strings of reasonable length.
@@ -569,6 +634,111 @@ class FeatureBuilder:
             row["year_gap_to_anchors"] = abs(float(year) - sum(a_years) / len(a_years))
         else:
             row["year_gap_to_anchors"] = NAN
+
+    # =========================================================
+    # Extra features: similarity to the played tracks in provided embedding
+    # spaces (for EVERY candidate, not only the retriever's top-k), user-track
+    # affinity, artist size and pool-relative popularity.
+    # =========================================================
+
+    def attach_embeddings(self, retrievers) -> None:
+        """Reuse the track/user matrices the item-to-item retrievers already hold."""
+        self._spaces = {}
+        self._user_space = None
+        for r in retrievers:
+            name = getattr(r, "name", None)
+            for key, rname in EMBEDDING_SPACES.items():
+                if name == rname and hasattr(r, "track_embeddings") \
+                        and hasattr(r, "track_to_index"):
+                    self._spaces[key] = (r.track_embeddings, r.track_to_index)
+            if name == "cf_bpr" and hasattr(r, "user_embeddings"):
+                self._user_space = (
+                    r.user_embeddings,
+                    r.track_embeddings,
+                    {t: i for i, t in enumerate(r.track_ids)},
+                )
+
+    def _get_artist_counts(self, metadata_lookup):
+        if self._artist_counts is None or metadata_lookup is not self.track_metadata:
+            counts: Dict[str, int] = {}
+            for m in metadata_lookup.values():
+                for a in _norm_set(m.get("artist_names")):
+                    counts[a] = counts.get(a, 0) + 1
+            if metadata_lookup is self.track_metadata:
+                self._artist_counts = counts
+            return counts
+        return self._artist_counts
+
+    def add_extra_features(self, rows, user_id=None, anchor_track_ids=None,
+                           metadata_lookup=None) -> None:
+        """
+        Fill EXTRA_FEATURES in place. `rows` need "track_id" (and, for
+        popularity_rank_in_pool, "candidate_popularity"). Unknown -> NaN.
+        """
+        for r in rows:
+            for n in EXTRA_FEATURES:
+                r[n] = NAN
+        if not rows:
+            return
+
+        ids = [r["track_id"] for r in rows]
+        anchors = list(anchor_track_ids or [])
+
+        # ---- embedding similarity to anchors ----
+        if anchors:
+            for key, (emb, index) in self._spaces.items():
+                a_idx = [index[a] for a in anchors if a in index]
+                if not a_idx:
+                    continue
+                c_pos = [i for i, t in enumerate(ids) if t in index]
+                if not c_pos:
+                    continue
+                A = _unit_rows(_take(emb, a_idx))                 # anchors x d
+                C = _unit_rows(_take(emb, [index[ids[i]] for i in c_pos]))
+                S = C @ A.T                                       # candidates x anchors
+                centroid = A.mean(axis=0)
+                norm = float(np.linalg.norm(centroid))
+                cen = (C @ (centroid / norm)) if norm > 0 else np.full(len(c_pos), np.nan)
+                last = S[:, -1]                                   # most recent anchor with an embedding
+                mx = S.max(axis=1)
+                for j, i in enumerate(c_pos):
+                    rows[i][f"emb_{key}_centroid_sim"] = float(cen[j])
+                    rows[i][f"emb_{key}_last_sim"] = float(last[j])
+                    rows[i][f"emb_{key}_max_sim"] = float(mx[j])
+
+        # ---- user <-> track affinity (cosine in CF-BPR space) ----
+        if user_id is not None and self._user_space is not None:
+            users, tmat, tindex = self._user_space
+            u = users.get(user_id)
+            if u is not None:
+                c_pos = [i for i, t in enumerate(ids) if t in tindex]
+                if c_pos:
+                    U = _unit_rows(_take(u, None)[None, :])[0]
+                    C = _unit_rows(_take(tmat, [tindex[ids[i]] for i in c_pos]))
+                    sims = C @ U
+                    for j, i in enumerate(c_pos):
+                        rows[i]["user_cf_sim"] = float(sims[j])
+
+        # ---- artist catalogue size ----
+        lookup = metadata_lookup if metadata_lookup is not None else self.track_metadata
+        if lookup:
+            counts = self._get_artist_counts(lookup)
+            for r in rows:
+                m = lookup.get(r["track_id"])
+                if m:
+                    cs = [counts.get(a, 0) for a in _norm_set(m.get("artist_names"))]
+                    if cs:
+                        r["artist_track_count"] = float(max(cs))
+
+        # ---- popularity percentile inside this pool ----
+        pops = [r.get("candidate_popularity", NAN) for r in rows]
+        valid = sorted(p for p in pops if p == p)
+        if valid:
+            import bisect
+            n = float(len(valid))
+            for r, p in zip(rows, pops):
+                if p == p:
+                    r["popularity_rank_in_pool"] = bisect.bisect_left(valid, p) / n
 
     # =========================================================
     # Utilities

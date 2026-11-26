@@ -75,6 +75,7 @@ def load_track_metadata(
             "genres": _as_list(row["tag_list"]),
             "year": _parse_year(row["release_date"]),
             "popularity": _to_float(row.get("popularity")),
+            "track_name": str(row.get("track_name") or ""),
         }
 
     n = len(out)
