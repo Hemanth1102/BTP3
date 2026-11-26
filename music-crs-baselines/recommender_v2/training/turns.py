@@ -23,13 +23,13 @@ Both the dataset builder and the evaluator should use this module so that the
 training distribution and the test-time distribution are identical.
 """
 
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 
 class TurnContext(NamedTuple):
     query: str                           # "user: ...\nassistant: ...\nuser: ..."
     history: List[Dict[str, Any]]        # messages visible at turn t (planner input)
-    ground_truth: str                    # track id of turn t
+    ground_truth: Optional[str]          # track id of turn t, when requested
     anchor_track_ids: List[str]          # track ids of turns < t, in order
     turn_number: int
     latest_user_message: str = ""        # the user message of turn t only
@@ -44,9 +44,14 @@ class TurnContext(NamedTuple):
         return self.latest_user_message
 
 
+def session_query_id(session_id, turn_number: int) -> str:
+    return f"{session_id}:{turn_number}"
+
+
 def get_turn_context(
     conversations: List[Dict[str, Any]],
     target_turn: int,
+    *, require_ground_truth: bool = True,
 ) -> TurnContext:
 
     history: List[Dict[str, Any]] = []
@@ -69,7 +74,7 @@ def get_turn_context(
                 anchors.append(message["content"])
                 history.append(message)
 
-            else:
+            elif require_ground_truth:
                 if ground_truth is not None:
                     raise ValueError(
                         f"Turn {target_turn} has more than one music message."
@@ -91,7 +96,7 @@ def get_turn_context(
     if not user_seen_for_target:
         raise ValueError(f"No user message found for turn {target_turn}.")
 
-    if ground_truth is None:
+    if ground_truth is None and require_ground_truth:
         raise ValueError(f"No ground-truth track found for turn {target_turn}.")
 
     # The query text only contains natural-language turns. Track ids are
