@@ -10,7 +10,7 @@ import torch
 
 import run_blind_inference
 from evaluate_responses import EvaluatedReply, distinct_2, report_metrics, write_report
-from recommender_v2.response.generator import GeneratedResponse, ResponseGenerator, query_seed
+from recommender_v2.response.generator import GeneratedResponse, ResponseGenerator, mentions_title, query_seed
 from recommender_v2.response.predictions import read_predictions
 from recommender_v2.splits import DIAGNOSTIC, TRAIN_SPLIT
 from recommender_v2.training.build_dataset import DATASET_NAME
@@ -94,6 +94,36 @@ def check_prompt_and_generation():
           "an empty ranked list makes no Ollama call")
 
 
+def check_mentions_and_retries():
+    check(not mentions_title("it will fit", "I", "Will") and not mentions_title("Homecoming", "Home"),
+          "substring fragments do not count as whole titles")
+    check(mentions_title("Try ‘Straße—Nacht’.", "STRASSE Nacht"),
+          "title matching casefolds and treats Unicode punctuation as word boundaries")
+    check(mentions_title("Try ‘I’ by Beyoncé.", "I", "Beyoncé") and
+          not mentions_title("Try ‘I’ by another artist.", "I", "Beyoncé") and
+          not mentions_title("Try ‘I’ by Beyoncéish.", "I", "Beyoncé"),
+          "short titles require a whole artist-name match")
+
+    chat = Mock(side_effect=[response("Try Song 2."), response("Try Song 3.")])
+    generator = ResponseGenerator(METADATA, num_demos=0, chat=chat)
+    reply = generator.generate("diag:6", CONVERSATION, 6, TRACKS)
+    check(reply.text == "Try Song 3." and not reply.used_template and chat.call_count == 2,
+          "only the retry can accept a top-five title below rank one")
+
+    chat = Mock(side_effect=[response("Song 1 sounds like Earlier 1."), response("Try Song 2 and Earlier 5.")])
+    generator = ResponseGenerator(METADATA, num_demos=0, chat=chat)
+    reply = generator.generate("diag:6", CONVERSATION, 6, TRACKS)
+    check(reply.used_template and "Earlier" not in reply.text and chat.call_count == 2,
+          "an unranked anchor title causes retry and fallback, including anchors outside the prompt's last three")
+
+    chat = Mock(return_value=response("Try Song 1 and Earlier 1."))
+    generator = ResponseGenerator(METADATA, num_demos=0, chat=chat)
+    reply = generator.generate("diag:6", CONVERSATION, 6, [*TRACKS[:4], "played1"])
+    check(not reply.used_template and chat.call_count == 1 and
+          generator.mentions_anchor(reply.text, ["played1"]),
+          "a top-five anchor is allowed during generation and counted by the anchor metric")
+
+
 def check_inference(directory):
     blind = {"session_id": "blind", "user_id": "user", "conversations": CONVERSATION[:-4]}
     old = {"session_id": "blind", "user_id": "user", "turn_number": 6,
@@ -131,9 +161,10 @@ def check_metrics(directory):
     generator = ResponseGenerator(METADATA, num_demos=0)
     prediction = {"session_id": "diag", "turn_number": 6, "predicted_track_ids": TRACKS[:2]}
     sample = [EvaluatedReply(prediction, GeneratedResponse("Song 1 fits.", 1.0, False), (5, 4)),
-              EvaluatedReply(prediction, GeneratedResponse("Song 2 fits.", 3.0, True), (1, 2))]
+              EvaluatedReply(prediction, GeneratedResponse("Song 2 fits.", 3.0, True), (1, 2), mentions_anchor=True)]
     metrics = report_metrics(sample, generator, judge=True)
     check(metrics["Catalogue diversity"] == 2 / 47_071 and metrics["Top-1 mention rate"] == .5 and
+          metrics["Any-top-5 mention rate"] == 1 and metrics["Anchor mention rate"] == .5 and
           metrics["Template fallback rate"] == .5 and metrics["Generation time, median (s)"] == 2 and
           metrics["Generation time, maximum (s)"] == 3 and metrics["Local Qwen judge proxy / Personalisation"] == .5,
           "proxy metrics use the catalogue denominator, mention and fallback rates, timing and normalized judge scores")
@@ -146,6 +177,7 @@ def check_metrics(directory):
 
 if __name__ == "__main__":
     check_prompt_and_generation()
+    check_mentions_and_retries()
     with TemporaryDirectory() as directory:
         check_inference(directory)
         check_metrics(directory)

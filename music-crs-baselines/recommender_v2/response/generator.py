@@ -4,7 +4,9 @@ import ast
 import hashlib
 import json
 import random
+import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from ..training.turns import get_turn_context
 
 DEFAULT_MODEL = "qwen3:8b"
 _PROMPT_DIR = Path(__file__).resolve().parents[2] / "mcrs" / "system_prompts"
+_MENTION_WORD = re.compile(r"[^\W_]+")
 _INSTRUCTIONS = """Reply in 2–4 sentences and under 80 words, as plain prose without lists, italics, bold, or emojis.
 Name the exact title and artist from rank 1 in your first sentence. Rank 1 stays first even when another track fits better.
 Briefly explain the fit, or acknowledge a mismatch and optionally present one or two more from Recommended tracks.
@@ -37,8 +40,19 @@ def query_seed(query_id):
     return int.from_bytes(digest[:4], "big") & 0x7FFF_FFFF
 
 
-def mentions_title(reply, title):
-    return bool(title) and title.casefold() in reply.casefold()
+def _mention_text(text):
+    return " ".join(_MENTION_WORD.findall(unicodedata.normalize("NFC", text.casefold())))
+
+
+def mentions_title(reply, title, artist=()):
+    title_words = _mention_text(title or "")
+    reply_words = f" {_mention_text(reply)} "
+    if not title_words or f" {title_words} " not in reply_words:
+        return False
+    if len(title_words.replace(" ", "")) >= 3:
+        return True
+    artists = (artist,) if isinstance(artist, str) else (artist or ())
+    return any(words and f" {words} " in reply_words for words in map(_mention_text, artists))
 
 
 def _demos(train_sessions, count):
@@ -103,6 +117,16 @@ class ResponseGenerator:
     def _artist(self, track_id):
         return ", ".join(self.metadata.get(track_id, {}).get("artist_names") or ())
 
+    def mentions_track(self, reply, track_id):
+        artists = self.metadata.get(track_id, {}).get("artist_names")
+        return mentions_title(reply, self.title(track_id), artists)
+
+    def mentions_anchor(self, reply, anchors, allowed_tracks=()):
+        allowed_titles = {_mention_text(self.title(track_id)) for track_id in allowed_tracks
+                          if self.mentions_track(reply, track_id)}
+        return any(_mention_text(self.title(track_id)) not in allowed_titles and self.mentions_track(reply, track_id)
+                   for track_id in anchors)
+
     def conversation_excerpt(self, conversations, turn_number):
         context = get_turn_context(conversations, turn_number, require_ground_truth=False)
         messages = [m for m in context.history if m["role"] in ("user", "assistant")][-6:]
@@ -158,10 +182,12 @@ class ResponseGenerator:
         if not tracks:
             return GeneratedResponse("", 0.0, False)
         prompt = self.build_prompt(conversations, turn_number, tracks)
-        titles = [self.title(track_id) for track_id in tracks]
-        for temperature in (0.7, 0.3):
+        anchors = get_turn_context(conversations, turn_number, require_ground_truth=False).anchor_track_ids
+        for temperature, required in ((0.7, tracks[:1]), (0.3, tracks)):
             reply = self._ask(self.system_prompt, prompt, query_id, temperature, 160)
-            if reply and len(reply.split()) <= 120 and any(mentions_title(reply, title) for title in titles):
+            if (reply and len(reply.split()) <= 120 and
+                    any(self.mentions_track(reply, track_id) for track_id in required) and
+                    not self.mentions_anchor(reply, anchors, allowed_tracks=tracks)):
                 return GeneratedResponse(reply, time.perf_counter() - started, False)
         return GeneratedResponse(self._template(tracks), time.perf_counter() - started, True)
 

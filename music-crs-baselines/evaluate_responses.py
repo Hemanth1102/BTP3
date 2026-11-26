@@ -10,12 +10,12 @@ from typing import Optional, Tuple
 
 import torch  # Initialize the existing recommender's dependencies before NumPy on Windows.
 
-from recommender_v2.response.generator import DEFAULT_MODEL, GeneratedResponse, ResponseGenerator, mentions_title
+from recommender_v2.response.generator import DEFAULT_MODEL, GeneratedResponse, ResponseGenerator
 from recommender_v2.response.predictions import generate_for_prediction, prediction_id, read_predictions, timing_summary
 from recommender_v2.splits import DEV_SPLIT, DIAGNOSTIC, TURNS
 from recommender_v2.training.build_dataset import DATASET_NAME
 from recommender_v2.training.metadata import load_track_metadata
-from recommender_v2.training.turns import session_query_id
+from recommender_v2.training.turns import get_turn_context, session_query_id
 
 
 CATALOGUE_SIZE = 47_071
@@ -38,6 +38,7 @@ class EvaluatedReply:
     prediction: dict
     generated: GeneratedResponse
     judge_scores: Optional[Tuple[int, int]] = None
+    mentions_anchor: bool = False
 
 
 def evaluate_sessions(sessions, predictions, generator, judge=False):
@@ -54,7 +55,8 @@ def evaluate_sessions(sessions, predictions, generator, judge=False):
             scores = None
             if judge and result.text:
                 scores = generator.judge(key, conversation, turn, prediction["predicted_track_ids"], result.text)
-            evaluated.append(EvaluatedReply(prediction, result, scores))
+            anchors = get_turn_context(conversation, turn, require_ground_truth=False).anchor_track_ids
+            evaluated.append(EvaluatedReply(prediction, result, scores, generator.mentions_anchor(result.text, anchors)))
             print(f"[{len(evaluated)}] {key} {result.seconds:.2f} s", flush=True)
     if not evaluated:
         raise ValueError("The prediction file has no rankings for the selected diagnostic sessions.")
@@ -69,8 +71,11 @@ def report_metrics(evaluated, generator, judge=False):
     metrics = {
         "Distinct-2": distinct_2(reply.text for reply in replies),
         "Catalogue diversity": len({track_id for tracks in rankings for track_id in tracks}) / CATALOGUE_SIZE,
-        "Top-1 mention rate": sum(bool(tracks) and mentions_title(reply.text, generator.title(tracks[0]))
+        "Top-1 mention rate": sum(bool(tracks) and generator.mentions_track(reply.text, tracks[0])
                                  for reply, tracks in zip(replies, rankings)) / total,
+        "Any-top-5 mention rate": sum(any(generator.mentions_track(reply.text, track_id) for track_id in tracks[:5])
+                                      for reply, tracks in zip(replies, rankings)) / total,
+        "Anchor mention rate": sum(row.mentions_anchor for row in evaluated) / total,
         "Template fallback rate": sum(reply.used_template for reply in replies) / total,
         "Generation time, median (s)": median_sec,
         "Generation time, maximum (s)": max_sec,
