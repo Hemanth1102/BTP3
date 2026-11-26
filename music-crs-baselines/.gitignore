@@ -5,6 +5,7 @@ __pycache__/
 uv.lock
 inference/
 results/recall_*.md
+results/responses_*.md
 
 # generated data / models / caches
 *.csv
