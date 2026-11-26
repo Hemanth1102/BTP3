@@ -30,10 +30,10 @@ class BM25Retriever(BaseRetriever):
         self.corpus_types = corpus_types
         self.cache_dir = cache_dir
 
-        self.corpus_name = "_".join(corpus_types)
+        self.corpus_name = self._corpus_cache_key()
         self.index_dir = os.path.join(
             cache_dir,
-            "bm25",
+            self.name,
             self.corpus_name,
         )
 
@@ -44,6 +44,9 @@ class BM25Retriever(BaseRetriever):
         else:
             self._build_index()
             self.bm25_model, self.track_ids = self._load_index()
+
+    def _corpus_cache_key(self) -> str:
+        return "_".join(self.corpus_types)
 
     def _load_corpus(self) -> Dict[str, Dict]:
         dataset = load_dataset(self.dataset_name)
@@ -121,12 +124,13 @@ class BM25Retriever(BaseRetriever):
         session_track_ids=None,
     ) -> List[RetrievalResult]:
 
-        query_tokens = bm25s.tokenize([query.lower()])
+        query_tokens = bm25s.tokenize([query.lower()], show_progress=False)
 
         scores = self.bm25_model.retrieve(
             query_tokens,
             k=topk,
             return_as="tuple",
+            show_progress=False,
         )
 
         documents = scores.documents[0]

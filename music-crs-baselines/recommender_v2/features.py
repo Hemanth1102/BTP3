@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 # list (NOT from whichever retrievers happen to be loaded), so a dataset built
 # with `--models bm25 cf` has exactly the same columns as one built with all
 # retrievers. Retrievers that were not run simply have present=0 / rank=NaN.
-KNOWN_RETRIEVERS = [
+_LEGACY_RETRIEVERS = [
     "bm25",
     "bge",
     "cf_bpr",
@@ -26,9 +26,17 @@ KNOWN_RETRIEVERS = [
     "transition_artist",
 ]
 
-QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio"]
+_NEW_ITEM_TO_ITEM_RETRIEVERS = [
+    "item_cf_bpr_decay", "item_cf_bpr_max",
+    "item_clap_decay", "item_clap_max",
+    "item_metadata_decay", "item_metadata_max",
+]
+KNOWN_RETRIEVERS = _LEGACY_RETRIEVERS + ["session_bm25", "anchor_album"] + _NEW_ITEM_TO_ITEM_RETRIEVERS
+FEATURE_SCHEMA_VERSION = 1
+
+QUERY_RETRIEVERS = ["bm25", "bge", "clap_audio", "session_bm25"]
 PERSONALIZED_RETRIEVERS = ["cf_bpr"]
-ITEM_TO_ITEM_RETRIEVERS = ["item_cf_bpr", "item_clap", "item_metadata"]
+ITEM_TO_ITEM_RETRIEVERS = ["item_cf_bpr", "item_clap", "item_metadata"] + _NEW_ITEM_TO_ITEM_RETRIEVERS
 ENTITY_RETRIEVERS = ["artist_lookup", "album_lookup", "title_lookup"]
 
 INTENTS = [
@@ -133,15 +141,9 @@ class FeatureBuilder:
 
         names: List[str] = []
 
-        for source in self.retriever_names:
-            p = self._safe_name(source)
-            names += [
-                f"{p}_present",
-                f"{p}_rank",
-                f"{p}_score",
-                f"{p}_score_norm",
-                f"{p}_rrf",
-            ]
+        names += self._retriever_feature_names(
+            source for source in self.retriever_names if source in _LEGACY_RETRIEVERS
+        )
 
         names += [
             "num_sources",
@@ -196,8 +198,15 @@ class FeatureBuilder:
         ]
 
         names += EXTRA_FEATURES
+        names += self._retriever_feature_names(
+            source for source in self.retriever_names if source not in _LEGACY_RETRIEVERS
+        )
 
         return names
+
+    def _retriever_feature_names(self, sources):
+        return [f"{self._safe_name(source)}_{suffix}" for source in sources
+                for suffix in ("present", "rank", "score", "score_norm", "rrf")]
 
     # =========================================================
     # Public API
@@ -258,6 +267,7 @@ class FeatureBuilder:
         anchor_meta = [
             metadata_lookup.get(a) or {} for a in (anchor_track_ids or [])
         ]
+        feature_names = self.feature_names()
 
         rows = []
 
@@ -292,7 +302,7 @@ class FeatureBuilder:
             )
 
             # Guarantee the schema, whatever the code paths above did.
-            for name in self.feature_names():
+            for name in feature_names:
                 row.setdefault(name, NAN)
 
             rows.append(row)

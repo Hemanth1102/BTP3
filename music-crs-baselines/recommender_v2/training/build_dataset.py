@@ -36,9 +36,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
-from recommender_v2.features import FeatureBuilder, KNOWN_RETRIEVERS
+from recommender_v2.features import FEATURE_SCHEMA_VERSION, FeatureBuilder, KNOWN_RETRIEVERS
 from recommender_v2.planner import QueryPlanner, QueryState
 from recommender_v2.ranker import RRFRanker
+from recommender_v2.splits import DEV_SPLIT, TRAIN_SPLIT, TURNS
 from recommender_v2.training.turns import get_turn_context
 
 
@@ -66,6 +67,14 @@ DEFAULT_MODELS = [
     "title",
     "anchor",
     "transition",
+    "session_bm25",
+    "anchor_album",
+    "item_cf_bpr_decay",
+    "item_cf_bpr_max",
+    "item_clap_decay",
+    "item_clap_max",
+    "item_metadata_decay",
+    "item_metadata_max",
 ]
 
 ALL_MODELS = DEFAULT_MODELS + ["clap"]
@@ -75,23 +84,38 @@ ALL_MODELS = DEFAULT_MODELS + ["clap"]
 # Retrievers
 # ---------------------------------------------------------------------------
 
-def build_retrievers(model_names, device="cpu", text_fields=None):
+def build_retrievers(model_names, device="cpu", text_fields=None, session_bm25_options=None):
 
     from recommender_v2 import config as C
+
+    item_sources = {}
+
+    def build_item(factory, mode):
+        retriever = factory(mode=mode, embedding_source=item_sources.get(factory))
+        item_sources.setdefault(factory, retriever)
+        return retriever
 
     factories = {
         "bm25": lambda: C.build_bm25(text_fields=text_fields),
         "bge": lambda: C.build_bge(device=device, text_fields=text_fields),
         "cf": lambda: C.build_cf_bpr(),
         "clap": lambda: C.build_clap(device=device),
-        "item_cf": lambda: C.build_item_cf(),
-        "item_clap": lambda: C.build_item_clap(),
-        "item_metadata": lambda: C.build_item_metadata(),
+        "item_cf": lambda: build_item(C.build_item_cf, "mean"),
+        "item_clap": lambda: build_item(C.build_item_clap, "mean"),
+        "item_metadata": lambda: build_item(C.build_item_metadata, "mean"),
         "artist": lambda: C.build_artist_lookup(),
         "album": lambda: C.build_album_lookup(),
         "title": lambda: C.build_title_lookup(),
         "anchor": lambda: C.build_anchor_artist(),
         "transition": lambda: C.build_transition_artist(),
+        "session_bm25": lambda: C.build_session_bm25(**(session_bm25_options or {})),
+        "anchor_album": C.build_anchor_album,
+        "item_cf_bpr_decay": lambda: build_item(C.build_item_cf, "decay"),
+        "item_cf_bpr_max": lambda: build_item(C.build_item_cf, "maxsim"),
+        "item_clap_decay": lambda: build_item(C.build_item_clap, "decay"),
+        "item_clap_max": lambda: build_item(C.build_item_clap, "maxsim"),
+        "item_metadata_decay": lambda: build_item(C.build_item_metadata, "decay"),
+        "item_metadata_max": lambda: build_item(C.build_item_metadata, "maxsim"),
     }
 
     retrievers = []
@@ -158,13 +182,13 @@ def main(argv=None):
 
     p = argparse.ArgumentParser()
 
-    p.add_argument("--split", default="train", choices=["train", "test"])
+    p.add_argument("--split", default=TRAIN_SPLIT, choices=[TRAIN_SPLIT, DEV_SPLIT])
     p.add_argument("--allow-test", action="store_true",
                    help="Required to build a dataset from the held-out test split.")
     p.add_argument("--start-session", type=int, default=0)
     p.add_argument("--num-sessions", type=int, default=100)
-    p.add_argument("--start-turn", type=int, default=1)
-    p.add_argument("--end-turn", type=int, default=8)
+    p.add_argument("--start-turn", type=int, default=TURNS.start)
+    p.add_argument("--end-turn", type=int, default=TURNS[-1])
     p.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=ALL_MODELS)
     p.add_argument("--candidate-k", type=int, default=100,
                    help="Candidates requested from EACH retriever.")
@@ -195,7 +219,7 @@ def main(argv=None):
 
     args = p.parse_args(argv)
 
-    if args.split == "test" and not args.allow_test:
+    if args.split == DEV_SPLIT and not args.allow_test:
         sys.exit(
             "Refusing to build training data from the test split. "
             "Pass --allow-test only for final evaluation datasets."
@@ -282,6 +306,14 @@ def main(argv=None):
 
     new_file = not out.exists() or out.stat().st_size == 0
     new_queries_file = not queries_path.exists() or queries_path.stat().st_size == 0
+    if args.resume:
+        for path, expected, is_new in ((out, fieldnames, new_file),
+                                       (queries_path, query_fields, new_queries_file)):
+            if not is_new:
+                with path.open(newline="", encoding="utf-8") as existing:
+                    if next(csv.reader(existing), None) != expected:
+                        sys.exit(f"Cannot resume {path}: columns differ from this run. "
+                                 "Choose a fresh output and reuse the planner cache.")
 
     errors: List[str] = []
     n_queries = n_fallback = 0
@@ -314,7 +346,7 @@ def main(argv=None):
             # session's own data when it is a training session.
             for _r in recommender.retrievers:
                 if hasattr(_r, "begin_session"):
-                    _r.begin_session(session_id, held_out=(args.split == "train"))
+                    _r.begin_session(session_id, held_out=(args.split == TRAIN_SPLIT))
 
             # Plan all uncached turns of this session concurrently (the LLM is
             # the bottleneck; retrieval/features below stay sequential).
@@ -364,6 +396,7 @@ def main(argv=None):
                     if cached is not None:
                         state = QueryState.from_dict(cached["state"])
                         used_fallback = bool(cached.get("fallback", False))
+                        state.raw_query = ctx.latest_user_message
                         state.anchor_track_ids = list(ctx.anchor_track_ids)
                     else:
                         t_plan = time.perf_counter()
@@ -384,6 +417,7 @@ def main(argv=None):
                             if sum(1 for x in errors if " planner: " in x) <= 3:
                                 print(f"  ! planner failed for {query_id}: {e!r}")
                             state = fallback_state(ctx.query)
+                            state.raw_query = ctx.latest_user_message
                             state.anchor_track_ids = list(ctx.anchor_track_ids)
                             used_fallback = True
                             planner_sec = time.perf_counter() - t_plan
@@ -524,6 +558,7 @@ def main(argv=None):
         "planner_tags_reused_from_cache": reused_tags,
         "metadata_features": not args.no_metadata,
         "meta_columns": META_COLUMNS,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "feature_names": feature_names,
         "summary": summary,
     }

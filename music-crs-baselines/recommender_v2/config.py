@@ -34,6 +34,12 @@ def build_bm25(text_fields=None):
     )
 
 
+def build_session_bm25(**options):
+    from .retrievers import SessionBM25Retriever
+
+    return SessionBM25Retriever(ITEM_DATASET, ["all_tracks"], **options)
+
+
 def build_cf_bpr():
     return CFBPRRetriever(
         user_dataset_name=USER_EMBEDDING_DATASET,
@@ -64,25 +70,28 @@ def build_clap(device="cpu"):
         device=device,
     )
 
-def build_item_cf():
+def build_item_cf(**options):
     return CFItemToItemRetriever(
         dataset_name=TRACK_EMBEDDING_DATASET,
         split="all_tracks",
         device="cpu",
+        **options,
     )
 
-def build_item_clap():
+def build_item_clap(**options):
     return CLAPItemToItemRetriever(
         dataset_name=TRACK_EMBEDDING_DATASET,
         split="all_tracks",
         device="cpu",
+        **options,
     )
 
-def build_item_metadata():
+def build_item_metadata(**options):
     return MetadataItemToItemRetriever(
         dataset_name=TRACK_EMBEDDING_DATASET,
         split="all_tracks",
         device="cpu",
+        **options,
     )
 
 def build_artist_lookup():
@@ -105,6 +114,11 @@ def build_anchor_artist():
         dataset_name=ITEM_DATASET,
         split_types=["all_tracks"],
     )
+
+def build_anchor_album(**options):
+    from .retrievers import AnchorAlbumRetriever
+
+    return AnchorAlbumRetriever(ITEM_DATASET, ["all_tracks"], **options)
 
 def build_transition_artist():
     from .retrievers import TransitionArtistRetriever
