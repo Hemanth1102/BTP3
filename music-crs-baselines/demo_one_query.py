@@ -4,8 +4,8 @@ Show the whole process for ONE query, step by step (for a live demo).
     python demo_one_query.py --ranker models\\full\\ranker.txt --session 5 --turn 3 \
         --models bm25 bge cf item_cf item_clap item_metadata artist album --device cpu
 
---split test uses the 1,000-session dev set (unseen by the model); --split train
-uses a training session (the model may have seen it, fine for a demo).
+--split test uses a dev session outside the final holdout. --split train
+uses a training session with cross-fitted retrieval.
 Prints: conversation so far -> planner output -> top candidates of each retriever
 -> feature values of the best candidates -> final top 20 -> where the gold track is.
 """
@@ -28,6 +28,12 @@ def main():
     ap.add_argument("--planner-model", default="qwen3:8b")
     ap.add_argument("--show", type=int, default=5, help="rows to show per retriever / feature table")
     args = ap.parse_args()
+    from recommender_v2.splits import DEV_SPLIT, FINAL_HOLDOUT, TRAIN_SPLIT
+
+    if args.session < 0:
+        ap.error("use a nonnegative session index")
+    if args.split == DEV_SPLIT and args.session in FINAL_HOLDOUT:
+        ap.error("the demo cannot score final holdout sessions")
 
     from datasets import load_dataset
     from recommender_v2 import RecommenderV2
@@ -51,6 +57,9 @@ def main():
         candidate_k=100, final_k=20, ranker_path=args.ranker,
         track_metadata=load_track_metadata(),
     )
+    for retriever in rec.retrievers:
+        if hasattr(retriever, "begin_session"):
+            retriever.begin_session(session["session_id"], held_out=(args.split == TRAIN_SPLIT))
 
     print("\n=== 1. CONVERSATION SO FAR (what the system may see) ===")
     for m in ctx.history:

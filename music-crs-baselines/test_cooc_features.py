@@ -3,6 +3,8 @@
 import json
 import sys
 import types
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from math import isclose
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +20,7 @@ from recommender_v2.retrievers.dense.bge import BGERetriever
 from recommender_v2.retrievers.item_to_item.cooc_track import CooccurrenceTrackRetriever
 from recommender_v2.retrievers.lexical.session_bm25 import SessionBM25Retriever
 from recommender_v2.retrievers.lexical.transition_artist import session_fold
+from recommender_v2.splits import FINAL_HOLDOUT
 from recommender_v2.training import build_dataset, metadata
 from test_training_pipeline import FakeDS, METADATA, RecordingLLM, check, make_session
 
@@ -101,6 +104,45 @@ def check_resume(directory):
     check(not llm.violations, "the existing visibility canary passes with co-occurrence enabled")
 
 
+def check_demo():
+    import datasets
+    import demo_one_query
+
+    session = make_session(0)
+    ollama = types.ModuleType("recommender_v2.planner.ollama")
+    ollama.OllamaQwenPlanner = lambda model: RecordingLLM()
+    calls = []
+    retrieval_calls = []
+    source = types.SimpleNamespace(begin_session=lambda sid, held_out: calls.append((sid, held_out)))
+
+    def retrieve(**kwargs):
+        retrieval_calls.append(list(calls))
+        return QueryState(), {}
+
+    recommender = types.SimpleNamespace(retrievers=[source], retrieve_for_ranking=retrieve,
+                                        build_features=lambda *args, **kwargs: [],
+                                        ranker=types.SimpleNamespace(predict=lambda features: []))
+    with patch.object(datasets, "load_dataset", side_effect=[[], {"train": [session]}]), \
+         patch.object(metadata, "load_track_metadata", return_value=METADATA), \
+         patch.object(build_dataset, "build_retrievers", return_value=[source]), \
+         patch("recommender_v2.RecommenderV2", return_value=recommender), \
+         patch.dict(sys.modules, {ollama.__name__: ollama}), \
+         patch.object(sys, "argv", ["demo_one_query.py", "--ranker", "unused", "--split", "train"]), \
+         redirect_stdout(StringIO()):
+        demo_one_query.main()
+    check(retrieval_calls == [[(session["session_id"], True)]],
+          "train demo excludes the session's fold before retrieval")
+
+    with patch.object(datasets, "load_dataset") as load, redirect_stderr(StringIO()), \
+         patch.object(sys, "argv", ["demo_one_query.py", "--ranker", "unused", "--session", str(FINAL_HOLDOUT.start)]):
+        try:
+            demo_one_query.main()
+        except SystemExit as error:
+            check(error.code == 2 and not load.called, "demo refuses the final holdout before loading data")
+        else:
+            check(False, "demo refuses the final holdout before loading data")
+
+
 def check_features(directory):
     def track(artist, album):
         return {"artist_names": [artist], "album_names": [album]}
@@ -181,6 +223,7 @@ if __name__ == "__main__":
     with TemporaryDirectory() as temp:
         check_cooc(temp)
         check_resume(temp)
+        check_demo()
         check_features(temp)
     if check.failed:
         raise SystemExit(1)
