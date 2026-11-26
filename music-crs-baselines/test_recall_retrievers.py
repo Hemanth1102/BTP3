@@ -10,7 +10,7 @@ import torch
 
 from recall_report import main as recall_main, measure_recall, write_report
 from recommender_v2 import RecommenderV2
-from recommender_v2.features import FeatureBuilder, KNOWN_RETRIEVERS
+from recommender_v2.features import FeatureBuilder, FULLPOOL_TEXT_FEATURES, KNOWN_RETRIEVERS
 from recommender_v2.planner import QueryPlanner, QueryState
 from recommender_v2.ranker import RRFRanker
 from recommender_v2.retrievers.base import RetrievalResult
@@ -171,9 +171,10 @@ def check_pipeline(retrievers, directory):
     check(rec.feature_builder.feature_names() == reduced.feature_builder.feature_names() == names
           and full and subset and all(set(row) == {"track_id", *names} for row in full + subset),
           "the full and reduced retriever sets produce identical feature schemas")
-    new_sources = {r.name for r in retrievers if getattr(r, "mode", None) != "mean"}
+    new_sources = {r.name for r in retrievers if getattr(r, "mode", None) != "mean"} | {"cooc_track"}
     original = FeatureBuilder(retriever_names=[n for n in KNOWN_RETRIEVERS if n not in new_sources])
     original = original.feature_names()
+    original = original[:original.index(FULLPOOL_TEXT_FEATURES[0])]
     check(names[:len(original)] == original, "new columns are appended after the legacy schema")
 
     calls = llm.calls

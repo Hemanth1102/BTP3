@@ -20,6 +20,19 @@ def normalize_name(text) -> str:
     return text
 
 
+def normalized_names(values):
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        values = (values,)
+    return {normalize_name(value) for value in values} - {""}
+
+
+def album_keys(album_names, artist_names):
+    """Identify each album by its normalized title and a credited artist."""
+    albums = normalized_names(album_names)
+    artists = normalized_names(artist_names)
+    return {(album, artist) for album in albums for artist in artists}
+
+
 # "Song (Remastered 2011)", "Song [Live]", "Song - Radio Edit" -> "Song"
 _SUFFIX = re.compile(r"\s*(\(.*?\)|\[.*?\]|\s-\s.*)$")
 

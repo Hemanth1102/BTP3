@@ -3,19 +3,12 @@
 import re
 from collections import defaultdict
 
+from ...text_norm import album_keys, normalize_name
 from ..base import BaseRetriever, RetrievalResult
-from .entity_index import as_list, normalize_name
 from .lookup_base import load_catalog, popularity_of
 
 
 GENERIC_ALBUMS = ("", "greatest hits", "best of", "live", "remastered", "deluxe")
-
-
-def album_keys(album_names, artist_names):
-    """Identify each album by its normalized title and a credited artist."""
-    albums = {normalize_name(name) for name in as_list(album_names)} - {""}
-    artists = {normalize_name(name) for name in as_list(artist_names)} - {""}
-    return {(album, artist) for album in albums for artist in artists}
 
 
 def _track_number(row, column):
