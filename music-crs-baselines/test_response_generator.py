@@ -34,6 +34,8 @@ METADATA = {
 METADATA.update({f"played{i}": {"track_name": f"Earlier {i}", "artist_names": [f"Singer {i}"]}
                  for i in range(1, 6)})
 METADATA["FORBIDDEN_MUSIC"] = {"track_name": "FORBIDDEN_MUSIC_TITLE"}
+METADATA["track1"]["track_name"] = "['Song 1']"
+METADATA["literal"] = {"track_name": "[Live]"}
 CONVERSATION = [item for turn in range(1, 6)
                 for item in [message(turn, "user", f"Request {turn}"), message(turn, "music", f"played{turn}"),
                              message(turn, "assistant", f"Reply {turn}")]] + [
@@ -71,6 +73,8 @@ def check_prompt_and_generation():
     check(first["model"] == "qwen3:8b" and first["think"] is False and first["keep_alive"] == "30m" and
           "format" not in first and first["options"]["temperature"] == .7 and first["options"]["num_predict"] == 160
           and not result.used_template, "valid case-insensitive mentions use one plain-text Qwen request")
+    check(generator.title("track1") == "Song 1" and generator.title("literal") == "[Live]",
+          "serialized catalogue title lists are unwrapped while literal bracketed titles are preserved")
 
     chat = Mock(side_effect=[response("An unrelated suggestion."), response("")])
     generated = ResponseGenerator(METADATA, num_demos=0, chat=chat).generate("diag:6", CONVERSATION, 6, TRACKS)

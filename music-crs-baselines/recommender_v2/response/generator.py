@@ -1,5 +1,6 @@
 """Present a ranked track list with the local Ollama model."""
 
+import ast
 import hashlib
 import json
 import random
@@ -85,7 +86,18 @@ class ResponseGenerator:
         self.system_prompt = "\n\n".join(prompts)
 
     def title(self, track_id):
-        return self.metadata.get(track_id, {}).get("track_name") or str(track_id)
+        value = self.metadata.get(track_id, {}).get("track_name")
+        # Some catalogue titles arrive as the string representation of a list.
+        if isinstance(value, str) and value.startswith("[") and value.endswith("]"):
+            try:
+                parsed = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                parsed = value
+            if isinstance(parsed, list):
+                value = parsed
+        if isinstance(value, list):
+            value = next((title for title in value if isinstance(title, str) and title.strip()), "")
+        return value or str(track_id)
 
     def _artist(self, track_id):
         return ", ".join(self.metadata.get(track_id, {}).get("artist_names") or ())
