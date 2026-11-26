@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 uv.lock
 inference/
+results/recall_*.md
 
 # generated data / models / caches
 *.csv
