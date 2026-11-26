@@ -60,6 +60,8 @@ def check_prompt_and_generation():
     check(first == second and first["options"]["seed"] == query_seed("diag:6"),
           "same query ID produces the same conversation, demonstration and seed")
     check("Example request\nAssistant: Example response" in system, "one deterministic train demonstration is reused")
+    check(system.index("Example response") < system.index("Name the exact title and artist from rank 1") and
+          "Do not use any Markdown" in system, "rank and style instructions take priority over the demonstration")
     check("FORBIDDEN" not in user and user.count("\nUser:") + user.count("\nAssistant:") == 6
           and "Reply 3" in user and "Request 3" not in user,
           "prompt only includes the last six visible user and assistant messages")
