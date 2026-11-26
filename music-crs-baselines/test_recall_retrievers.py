@@ -70,23 +70,48 @@ def check_lexical(directory):
     check(set(ids(retrieved)).isdisjoint({"old", "recent", "jazz"}) and retrieved,
           "session BM25 skips both anchors and other played tracks")
 
-    with patch.object(anchor_album, "load_catalog", return_value=catalogue):
+    album_catalogue = [
+        dict(row, artist_name=["North"]) if row["track_id"] in {"east", "west"} else row
+        for row in catalogue
+    ] + [
+        {"track_id": "north_recent", "album_name": "Echo", "artist_name": ["NORTH"]},
+        {"track_id": "south_alternate", "album_name": "Echo", "artist_name": ["South"]},
+    ]
+    with patch.object(anchor_album, "load_catalog", return_value=album_catalogue):
         album = anchor_album.AnchorAlbumRetriever("test", ["tracks"])
         capped = anchor_album.AnchorAlbumRetriever("test", ["tracks"], max_album_tracks=3)
-    results = album.retrieve("ignored", anchor_track_ids=["old", "recent"])
+    results = album.retrieve("ignored", anchor_track_ids=["old", "north_recent"])
     check(ids(results) == ["west", "east"] and all(r.score == 1.5 for r in results),
           "album normalization, recency and popularity order")
-    check(ids(album.retrieve("", anchor_track_ids=["old", "recent"],
+    check(ids(album.retrieve("", anchor_track_ids=["old", "north_recent"],
                              session_track_ids=["west"])) == ["east"],
           "album retrieval skips both kinds of played tracks")
-    check(not album.retrieve("", anchor_track_ids=["generic"]) and
-          not capped.retrieve("", anchor_track_ids=["old"]), "generic and oversized albums ignored")
+    check(ids(album.retrieve("", anchor_track_ids=["recent"])) == ["south_alternate"],
+          "artists with the same album name retain separate track lists")
+    check(not capped.retrieve("", anchor_track_ids=["old"]) and
+          ids(capped.retrieve("", anchor_track_ids=["recent"])) == ["south_alternate"],
+          "album size limit applies per artist and title")
+    check(anchor_album.album_keys("Echo", ["North", "South"]) ==
+          {("echo", "north"), ("echo", "south")}, "collaborations have one key per artist")
 
-    numbered = [dict(row, track_number=number) for number, row in enumerate(catalogue, 1)]
+    numbered = [dict(row, track_number=number) for number, row in enumerate(album_catalogue, 1)]
     with patch.object(anchor_album, "load_catalog", return_value=numbered):
         by_track = anchor_album.AnchorAlbumRetriever("test", ["tracks"])
-    check(ids(by_track.retrieve("", anchor_track_ids=["old", "recent"])) == ["east", "west"],
+    check(ids(by_track.retrieve("", anchor_track_ids=["old", "north_recent"])) == ["east", "west"],
           "track number takes precedence over popularity when present")
+
+    names = ["The Very Best of Queen", "Live at Wembley", "Greatest Hits Vol 2", "Alive", "Liveliness"]
+    albums = [{"track_id": f"{i}-{track}", "album_name": name, "artist_name": ["Queen"]}
+              for i, name in enumerate(names) for track in ("anchor", "candidate")]
+    with patch.object(anchor_album, "load_catalog", return_value=albums):
+        filtered = anchor_album.AnchorAlbumRetriever("test", ["tracks"])
+        custom = anchor_album.AnchorAlbumRetriever("test", ["tracks"], generic_albums=("queen",))
+    for i, name in enumerate(names):
+        expected = [f"{i}-candidate"] if i >= 3 else []
+        check(ids(filtered.retrieve("", anchor_track_ids=[f"{i}-anchor"])) == expected,
+              f"generic phrase filter handles {name!r}")
+    check(ids(custom.retrieve("", anchor_track_ids=["1-anchor"])) == ["1-candidate"],
+          "generic phrase list can be configured")
     return bm25, album
 
 

@@ -1,5 +1,6 @@
 """Album continuation from previously played tracks."""
 
+import re
 from collections import defaultdict
 
 from ..base import BaseRetriever, RetrievalResult
@@ -8,6 +9,13 @@ from .lookup_base import load_catalog, popularity_of
 
 
 GENERIC_ALBUMS = ("", "greatest hits", "best of", "live", "remastered", "deluxe")
+
+
+def album_keys(album_names, artist_names):
+    """Identify each album by its normalized title and a credited artist."""
+    albums = {normalize_name(name) for name in as_list(album_names)} - {""}
+    artists = {normalize_name(name) for name in as_list(artist_names)} - {""}
+    return {(album, artist) for album in albums for artist in artists}
 
 
 def _track_number(row, column):
@@ -31,12 +39,14 @@ class AnchorAlbumRetriever(BaseRetriever):
         if number_column is None:
             print(f"Anchor album uses popularity order. Track metadata columns: {columns}")
 
-        ignored = {normalize_name(name) for name in generic_albums} | {""}
+        phrases = sorted({normalize_name(name) for name in generic_albums} - {""})
+        ignored = re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, phrases)) + r")(?!\w)") if phrases else None
         album_rows = defaultdict(dict)
         self.track_albums = {}
         for row in catalogue:
             track_id = row["track_id"]
-            albums = {normalize_name(name) for name in as_list(row.get("album_name"))} - ignored
+            albums = {key for key in album_keys(row.get("album_name"), row.get("artist_name"))
+                      if ignored is None or not ignored.search(key[0])}
             self.track_albums[track_id] = sorted(albums)
             popularity = popularity_of(row)
             order = (_track_number(row, number_column),
